@@ -1,0 +1,34 @@
+{{define "content"}}
+<h1>library</h1>
+{{with .Library}}
+{{if not .Sections}}
+<p class="muted">nothing here yet: {{if $.User.IsAdmin}}no library has synced.{{else}}none of your requests are in the library.{{end}}</p>
+{{else}}
+<nav class="tabs" aria-label="libraries">
+    {{range .Sections}}<a href="/library/{{.Key}}"{{if eq .Key $.Library.Current.Key}} class="current" aria-current="page"{{end}}>{{.Title}}</a>{{end}}
+</nav>
+{{if .Current.Key}}
+<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}.</p>
+<table class="library">
+    <thead><tr>
+        <th><span class="visually-hidden">poster</span></th><th>title</th><th>added</th><th>size</th>
+        <th>requested by</th><th>last watched</th>{{if $.User.IsAdmin}}<th>managed by</th>{{end}}
+    </tr></thead>
+    <tbody>
+    {{range .Items}}
+    <tr>
+        <td><img class="poster" src="/poster/{{.RatingKey}}" alt="" width="60" height="90" loading="lazy"></td>
+        <td>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</td>
+        <td>{{day .AddedAt}}</td>
+        <td>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">?</span>{{end}}</td>
+        <td>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</td>
+        <td>{{day .LastWatched}}</td>
+        {{if $.User.IsAdmin}}<td>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</td>{{end}}
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
+{{end}}
+{{end}}
+{{end}}

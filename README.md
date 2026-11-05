@@ -3,8 +3,8 @@
 A small web app for removing media from a Plex library. Users ask to keep or
 delete what they requested in Seerr, an admin approves, and the app removes it
 through Radarr/Sonarr, Seerr and Plex in an order that stops it being
-downloaded again. Status: early beta (sign-in and the sync from every service work;
-library and deletion screens are not built yet).
+downloaded again. Status: early beta (sign-in, the sync from every service and a read-only
+library screen work; statuses and deletion are not built yet).
 
 ## Deployment
 

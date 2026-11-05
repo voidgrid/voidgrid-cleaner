@@ -280,3 +280,84 @@ func (db *DB) SyncReport(ctx context.Context, limit int) (counts map[string]int,
 	}
 	return counts, items, nil
 }
+
+// LibraryItem is one row of the library screen.
+type LibraryItem struct {
+	Media
+	Requesters  string // display names, comma-separated; "" if nobody requested it
+	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
+}
+
+// owned limits a query to items the user requested (any status). It is
+// the server-side ownership rule: non-admins only ever see or act on these.
+const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user_id = ? AND rating_key IS NOT NULL)`
+
+// VisibleSections lists the libraries the user may see, in Plex's order:
+// all of them for an admin, only those holding something they requested
+// otherwise.
+func (db *DB) VisibleSections(ctx context.Context, u User) ([]Section, error) {
+	q := `SELECT section_key, title, type FROM sections ORDER BY position`
+	args := []any{}
+	if !u.IsAdmin {
+		q = `SELECT s.section_key, s.title, s.type FROM sections s
+			WHERE EXISTS (SELECT 1 FROM media m WHERE m.section_key = s.section_key AND ` + owned + `)
+			ORDER BY s.position`
+		args = append(args, u.SeerrID)
+	}
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Section
+	for rows.Next() {
+		var sec Section
+		if err := rows.Scan(&sec.Key, &sec.Title, &sec.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, sec)
+	}
+	return out, rows.Err()
+}
+
+// LibraryItems lists a library's items the user may see, by title.
+func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string) ([]LibraryItem, error) {
+	q := `SELECT m.rating_key, m.section_key, m.type, m.title, m.year, m.thumb, m.added_at, m.tmdb_id, m.tvdb_id, m.arr_id, m.size_bytes,
+			coalesce((SELECT group_concat(name, ', ') FROM (
+				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
+				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
+			coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0)
+		FROM media m WHERE m.section_key = ?`
+	args := []any{sectionKey}
+	if !u.IsAdmin {
+		q += ` AND ` + owned
+		args = append(args, u.SeerrID)
+	}
+	q += ` ORDER BY m.title COLLATE NOCASE, m.year`
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []LibraryItem
+	for rows.Next() {
+		var it LibraryItem
+		m := &it.Media
+		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// Thumb returns the Plex thumb path of a library item, "" if unknown.
+func (db *DB) Thumb(ctx context.Context, ratingKey string) (string, error) {
+	var t string
+	err := db.QueryRowContext(ctx, `SELECT thumb FROM media WHERE rating_key = ?`, ratingKey).Scan(&t)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return t, err
+}

@@ -3,12 +3,17 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,15 +43,30 @@ type Server struct {
 	PinWait time.Duration
 	// SyncNow starts a sync in the background.
 	SyncNow func()
+	// Posters resizes Plex artwork; PosterCache holds the results on disk.
+	Posters     PosterSource
+	PosterCache *os.Root
 
 	limiter limiter
 }
 
 type page struct {
-	User  *storage.User
-	Error string
-	Email string
-	Sync  *syncPage
+	User    *storage.User
+	Error   string
+	Email   string
+	Sync    *syncPage
+	Library *libraryPage
+}
+
+// PosterSource returns a Plex thumb resized to width x height as JPEG.
+type PosterSource interface {
+	Poster(ctx context.Context, thumb string, width, height int) ([]byte, error)
+}
+
+type libraryPage struct {
+	Sections []storage.Section
+	Current  storage.Section
+	Items    []storage.LibraryItem
 }
 
 type syncPage struct {
@@ -59,13 +79,22 @@ type syncPage struct {
 var pages = map[string]*template.Template{}
 
 func init() {
-	funcs := template.FuncMap{"when": func(unix int64) string {
-		if unix == 0 {
-			return "never"
-		}
-		return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC")
-	}}
-	for _, name := range []string{"login", "home", "sync"} {
+	funcs := template.FuncMap{
+		"when": func(unix int64) string {
+			if unix == 0 {
+				return "never"
+			}
+			return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC")
+		},
+		"day": func(unix int64) string {
+			if unix == 0 {
+				return "never"
+			}
+			return time.Unix(unix, 0).UTC().Format("2006-01-02")
+		},
+		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
+	}
+	for _, name := range []string{"login", "home", "sync", "library"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -102,6 +131,9 @@ func (s *Server) Router() http.Handler {
 			u := userFrom(r.Context())
 			render(w, http.StatusOK, "home", page{User: &u})
 		})
+		r.Get("/library", s.library)
+		r.Get("/library/{key}", s.library)
+		r.Get("/poster/{ratingKey}", s.poster)
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)
 			r.Get("/sync", s.syncStatus)
@@ -131,6 +163,93 @@ func (s *Server) syncStatus(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "sync", page{User: &u, Sync: &syncPage{
 		Statuses: st, Counts: counts, Unmatched: items, Started: r.URL.Query().Get("started") == "1",
 	}})
+}
+
+// library shows one tab per visible Plex library. /library opens the first.
+func (s *Server) library(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	secs, err := s.DB.VisibleSections(r.Context(), u)
+	if err != nil {
+		log.Printf("web: sections: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	key := chi.URLParam(r, "key")
+	if key == "" {
+		if len(secs) == 0 {
+			render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{}})
+			return
+		}
+		http.Redirect(w, r, "/library/"+url.PathEscape(secs[0].Key), http.StatusSeeOther)
+		return
+	}
+	i := slices.IndexFunc(secs, func(sec storage.Section) bool { return sec.Key == key })
+	if i < 0 {
+		// Unknown, or nothing in it the user requested. A full page, not a bare
+		// error, so the menu and the user's own tabs still work.
+		render(w, http.StatusForbidden, "library", page{
+			User: &u, Library: &libraryPage{Sections: secs},
+			Error: "I'm sorry Dave, I can't do that",
+		})
+		return
+	}
+	items, err := s.DB.LibraryItems(r.Context(), u, key)
+	if err != nil {
+		log.Printf("web: library items: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items}})
+}
+
+// Poster size on the library screen (2x for sharp high-DPI screens).
+const posterW, posterH = 120, 180
+
+// poster serves a library item's poster from the disk cache, fetching it
+// from Plex the first time. Any signed-in user may see any poster: artwork
+// is not private, and the ownership rule is about actions.
+func (s *Server) poster(w http.ResponseWriter, r *http.Request) {
+	thumb, err := s.DB.Thumb(r.Context(), chi.URLParam(r, "ratingKey"))
+	if err != nil {
+		log.Printf("web: poster thumb: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if thumb == "" {
+		http.NotFound(w, r)
+		return
+	}
+	// The thumb path changes when the artwork does, so it names the file.
+	sum := sha256.Sum256([]byte(thumb))
+	name := hex.EncodeToString(sum[:]) + ".jpg"
+	b, err := s.PosterCache.ReadFile(name)
+	if err != nil {
+		if b, err = s.Posters.Poster(r.Context(), thumb, posterW, posterH); err != nil {
+			log.Printf("web: poster: %v", err)
+			http.Error(w, "poster unavailable", http.StatusBadGateway)
+			return
+		}
+		// shortcut: the cache never shrinks; ~10 KB a poster, prune by hand if the library churns a lot.
+		if err := writeAtomic(s.PosterCache, name, b); err != nil {
+			log.Printf("web: cache poster: %v", err)
+		}
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(b) //nolint:gosec // G705: Plex image bytes served as image/jpeg with nosniff, never as HTML
+}
+
+// writeAtomic writes name in root via a temp file and rename, so a reader
+// never sees a half-written file.
+func writeAtomic(root *os.Root, name string, b []byte) error {
+	rnd := make([]byte, 8)
+	_, _ = rand.Read(rnd)
+	tmp := "." + name + "." + hex.EncodeToString(rnd)
+	if err := root.WriteFile(tmp, b, 0o600); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return root.Rename(tmp, name)
 }
 
 // requireAdmin refuses non-admins; it runs after requireSession.

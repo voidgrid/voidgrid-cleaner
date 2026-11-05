@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -54,6 +55,16 @@ func run() error {
 		return fmt.Errorf("plex client id: %w", err)
 	}
 
+	posterDir := filepath.Join(filepath.Dir(cfg.DBPath), "posters")
+	if err := os.MkdirAll(posterDir, 0o750); err != nil {
+		return fmt.Errorf("poster cache: %w", err)
+	}
+	posters, err := os.OpenRoot(posterDir)
+	if err != nil {
+		return fmt.Errorf("poster cache: %w", err)
+	}
+	defer func() { _ = posters.Close() }()
+
 	hc := &http.Client{Timeout: 30 * time.Second}
 	// Whole-library and whole-history reads can take longer than a page load.
 	slow := &http.Client{Timeout: 5 * time.Minute}
@@ -73,6 +84,9 @@ func run() error {
 		Seerr:   sc,
 		PlexTV:  &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
 		PinWait: 3 * time.Second,
+		// Posters fetch with the short timeout: a page waits on them.
+		Posters:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
+		PosterCache: posters,
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

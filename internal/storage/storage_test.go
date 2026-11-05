@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -78,5 +79,55 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	if _, err := db.SessionUser(ctx, tok); !errors.Is(err, ErrNoSession) {
 		t.Fatalf("after logout: %v", err)
+	}
+}
+
+func TestLibraryOwnership(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx,
+		[]Section{{Key: "1", Title: "Movies", Type: "movie"}, {Key: "2", Title: "TV", Type: "show"}},
+		[]Media{
+			{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "b"},
+			{RatingKey: "11", SectionKey: "1", Type: "movie", Title: "A"},
+			{RatingKey: "20", SectionKey: "2", Type: "show", Title: "s"},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []User{{SeerrID: 1, Name: "ann"}, {SeerrID: 2, Name: "bob"}} {
+		if err := db.UpsertUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rk := sql.NullString{String: "10", Valid: true}
+	if err := db.ReplaceRequests(ctx, []Request{
+		{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: rk},
+		{SeerrRequestID: 2, SeerrUserID: 1, RatingKey: rk},
+		{SeerrRequestID: 3, SeerrUserID: 2}, // not in Plex
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertPlays(ctx, []Play{{ReferenceID: 1, RatingKey: "10", ShowRatingKey: "10", Stopped: 500}}); err != nil {
+		t.Fatal(err)
+	}
+
+	bob := User{SeerrID: 2}
+	secs, err := db.VisibleSections(ctx, bob)
+	if err != nil || len(secs) != 1 || secs[0].Key != "1" {
+		t.Fatalf("bob's sections %+v %v", secs, err)
+	}
+	items, err := db.LibraryItems(ctx, bob, "1")
+	if err != nil || len(items) != 1 || items[0].RatingKey != "10" || items[0].Requesters != "ann, bob" || items[0].LastWatched != 500 {
+		t.Fatalf("bob's items %+v %v", items, err)
+	}
+	if items, _ := db.LibraryItems(ctx, bob, "2"); len(items) != 0 {
+		t.Fatalf("bob sees %d items of a library he requested nothing in", len(items))
+	}
+
+	admin := User{SeerrID: 9, IsAdmin: true}
+	secs, _ = db.VisibleSections(ctx, admin)
+	items, _ = db.LibraryItems(ctx, admin, "1")
+	if len(secs) != 2 || len(items) != 2 || items[0].Title != "A" || items[1].Requesters != "ann, bob" {
+		t.Fatalf("admin %+v %+v", secs, items)
 	}
 }

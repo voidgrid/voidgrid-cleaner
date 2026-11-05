@@ -182,3 +182,49 @@ code, .mono {
     gap: 0.5rem;
     margin: 1rem 0;
 }
+
+/* Library tabs: one per Plex library. */
+nav.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1rem;
+}
+
+nav.tabs a {
+    padding: 0.4rem 0.9rem;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    text-decoration: none;
+    color: var(--fg-dim);
+}
+
+nav.tabs a.current {
+    color: var(--bg);
+    background: var(--fg-dim);
+    font-weight: bold;
+}
+
+nav.tabs a:hover {
+    color: var(--fg-bright);
+}
+
+table.library td {
+    vertical-align: middle;
+}
+
+img.poster {
+    display: block;
+    border: 1px solid var(--border);
+    background: var(--fg-dim);
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
