@@ -43,6 +43,9 @@ func fakeTautulli(t *testing.T, rows int) *Client {
 			}
 			if start == 0 && rows > 0 {
 				out = append(out, `{"media_type":"track","rating_key":1}`) // music is dropped
+				// A session still playing, as Tautulli appends it: null IDs. Dropped.
+				out = append(out, `{"reference_id":null,"row_id":null,"id":null,"media_type":"episode","rating_key":7001,
+					"user_id":555,"group_count":null,"state":"playing","stopped":1462688400}`)
 			}
 			_, _ = w.Write([]byte(`{"response":{"result":"success","message":null,"data":{"recordsFiltered":` +
 				strconv.Itoa(rows) + `,"data":[` + strings.Join(out, ",") + `]}}}`))

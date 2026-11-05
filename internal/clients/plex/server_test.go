@@ -27,7 +27,7 @@ func fakePMS(t *testing.T) (*Server, func() []string) {
 			t.Error("includeGuids not set")
 		}
 		_, _ = w.Write([]byte(`{"MediaContainer":{"size":1,"Metadata":[
-			{"ratingKey":"1049","type":"movie","title":"Zoolander","year":2001,
+			{"ratingKey":"1049","guid":"plex://movie/5d776824f54112001f5bbdd7","type":"movie","title":"Zoolander","year":2001,
 			 "thumb":"/library/metadata/1049/thumb/1434341184","addedAt":1408525217,
 			 "Guid":[{"id":"imdb://tt0196229"},{"id":"tmdb://9398"}]}]}}`))
 	})
@@ -69,7 +69,7 @@ func TestSectionsAndItems(t *testing.T) {
 		t.Fatalf("items %+v %v", items, err)
 	}
 	it := items[0]
-	if it.RatingKey != "1049" || it.AddedAt != 1408525217 || it.ExternalID("tmdb") != "9398" || it.ExternalID("tvdb") != "" {
+	if it.RatingKey != "1049" || it.AddedAt != 1408525217 || it.ExternalID("tmdb") != "9398" || it.ExternalID("tvdb") != "" || it.PlexGUID != "plex://movie/5d776824f54112001f5bbdd7" {
 		t.Fatalf("item %+v", it)
 	}
 }

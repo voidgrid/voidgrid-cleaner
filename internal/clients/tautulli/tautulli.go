@@ -58,6 +58,9 @@ type Play struct {
 	PercentComplete      Int     `json:"percent_complete"`
 	WatchedStatus        float64 `json:"watched_status"` // 0, 0.5 or 1
 	Stopped              Int     `json:"stopped"`        // unix seconds
+	// State is set ("playing", "paused") only on sessions still in progress,
+	// which Tautulli appends to history with null IDs.
+	State string `json:"state"`
 }
 
 // Session is something being played right now.
@@ -72,7 +75,7 @@ type Session struct {
 // historyPage is how many rows History asks for per call.
 const historyPage = 1000
 
-// History returns movie and episode plays from the given day on (Tautulli
+// History returns finished movie and episode plays from the given day on (Tautulli
 // filters by date, inclusive), oldest first. Resumed sessions are grouped
 // into one play, whatever Tautulli's own grouping setting is.
 func (c *Client) History(ctx context.Context, after time.Time) ([]Play, error) {
@@ -89,7 +92,7 @@ func (c *Client) History(ctx context.Context, after time.Time) ([]Play, error) {
 			return nil, err
 		}
 		for _, p := range data.Data {
-			if p.MediaType == "movie" || p.MediaType == "episode" {
+			if (p.MediaType == "movie" || p.MediaType == "episode") && p.State == "" {
 				all = append(all, p)
 			}
 		}

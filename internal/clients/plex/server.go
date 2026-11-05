@@ -34,7 +34,11 @@ type Item struct {
 	Year      int    `json:"year"`
 	Thumb     string `json:"thumb"`
 	AddedAt   int64  `json:"addedAt"`
-	Guids     []struct {
+	// Plex also sends "guid" (a plex:// string). It must have its own field:
+	// encoding/json matches names case-insensitively, so it would otherwise
+	// land on Guids and fail to decode.
+	PlexGUID string `json:"guid"`
+	Guids    []struct {
 		ID string `json:"id"` // e.g. "tmdb://105", "tvdb://299"
 	} `json:"Guid"`
 }
