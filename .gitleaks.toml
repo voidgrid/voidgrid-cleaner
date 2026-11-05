@@ -1,0 +1,8 @@
+# Default rules, minus local build output and the Go module cache
+# (third-party code under .dev/ trips generic-api-key).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "local build output and caches"
+paths = ['''^\.dev/''', '''^bin/''']

@@ -1,0 +1,14 @@
+{{define "content"}}
+<h1>login</h1>
+<p><a href="/login/plex">sign in with Plex</a></p>
+<h2>Seerr local account</h2>
+<form class="stack" method="post" action="/login/local">
+    <label>email
+        <input type="email" name="email" value="{{.Email}}" autocomplete="username" required>
+    </label>
+    <label>password
+        <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">log in</button>
+</form>
+{{end}}

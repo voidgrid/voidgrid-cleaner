@@ -1,0 +1,15 @@
+# Example only: adjust the network, URL and key to your setup.
+services:
+  voidgrid-cleaner:
+    image: ghcr.io/voidgrid/voidgrid-cleaner:latest
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+    environment:
+      VGC_SEERR_URL: http://seerr:5055
+      VGC_SEERR_API_KEY: CHANGEME
+    volumes:
+      - voidgrid-cleaner-data:/data
+
+volumes:
+  voidgrid-cleaner-data:

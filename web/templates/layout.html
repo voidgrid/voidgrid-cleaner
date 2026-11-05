@@ -1,0 +1,27 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>voidgrid-cleaner</title>
+    <link rel="stylesheet" href="/static/terminal.css">
+</head>
+<body>
+    <header class="topbar">
+        <span class="brand">voidgrid-cleaner &gt;_</span>
+        {{if .User}}
+        <nav>
+            <a href="/">status</a>
+            <span class="muted">{{.User.Name}}{{if .User.IsAdmin}} (admin){{end}}</span>
+            <form class="inline-form" method="post" action="/logout"><button type="submit">logout</button></form>
+        </nav>
+        {{end}}
+    </header>
+    <main>
+        {{if .Error}}<div class="flash-error" role="alert">{{.Error}}</div>{{end}}
+        {{template "content" .}}
+    </main>
+    <footer>voidgrid-cleaner</footer>
+</body>
+</html>
+{{end}}

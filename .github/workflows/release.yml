@@ -1,0 +1,63 @@
+name: Build and push to ghcr.io
+
+# Tag rules:
+# - A hyphen in the tag marks a pre-release (e.g. v0.2.0-rc1): pushes
+#   :<tag> and :beta only.
+# - A tag with no hyphen is stable (e.g. v0.2.0): pushes :<tag>, :latest,
+#   and :beta.
+# - Exact version tags never move - protect v* tags with a ruleset
+#   (no force-push, no deletion) so a tag can't be silently reused for a
+#   different image. That's a repo setting, not something this workflow
+#   file can enforce on its own.
+# - Needs repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a read-only
+#   Docker Hub access token): anonymous pulls of the base images are rate
+#   limited per runner IP, and the shared runner pool exhausts that.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Log in to Docker Hub (base image pulls)
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="$IMAGE:$TAG"
+          if [[ "$TAG" == *-* ]]; then
+            TAGS="$TAGS,$IMAGE:beta"
+          else
+            TAGS="$TAGS,$IMAGE:latest,$IMAGE:beta"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
