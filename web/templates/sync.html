@@ -3,7 +3,7 @@
 {{with .Sync}}
 {{if .Started}}<div class="flash-info" role="status">sync started; reload in a minute.</div>{{end}}
 <form class="inline-form" method="post" action="/sync"><button type="submit">sync now</button></form>
-<p class="muted">runs every 30 minutes on its own.</p>
+<p class="muted">runs every hour on its own; once a day the history step re-reads all of Tautulli's history.</p>
 
 <table>
     <thead><tr><th>source</th><th>last success</th><th>items</th><th>last attempt</th><th>error</th></tr></thead>

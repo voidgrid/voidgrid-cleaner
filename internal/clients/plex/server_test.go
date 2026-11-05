@@ -74,7 +74,7 @@ func TestSectionsAndItems(t *testing.T) {
 	}
 }
 
-func TestRefreshAndEmptyTrashMethods(t *testing.T) {
+func TestRefreshEmptyTrashAndDeleteMethods(t *testing.T) {
 	s, calls := fakePMS(t)
 	ctx := context.Background()
 	if err := s.RefreshSection(ctx, "1"); err != nil {
@@ -83,8 +83,12 @@ func TestRefreshAndEmptyTrashMethods(t *testing.T) {
 	if err := s.EmptyTrash(ctx, "1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.DeleteItem(ctx, "1049"); err != nil {
+		t.Fatal(err)
+	}
 	got := calls()
-	if len(got) != 2 || got[0] != "POST /library/sections/1/refresh" || got[1] != "PUT /library/sections/1/emptyTrash" {
+	if len(got) != 3 || got[0] != "POST /library/sections/1/refresh" || got[1] != "PUT /library/sections/1/emptyTrash" ||
+		got[2] != "DELETE /library/metadata/1049" {
 		t.Fatalf("calls %v", got)
 	}
 }

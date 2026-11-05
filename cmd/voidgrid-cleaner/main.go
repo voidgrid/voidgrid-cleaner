@@ -65,6 +65,8 @@ func run() error {
 		Radarr:   arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
 		Sonarr:   arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
 		Tautulli: &tautulli.Client{BaseURL: cfg.TautulliURL, APIKey: cfg.TautulliAPIKey, HTTP: slow},
+
+		IgnoreLibraries: cfg.IgnoreLibraries,
 	}
 	s := &web.Server{
 		DB:      db,
@@ -85,8 +87,8 @@ func run() error {
 	// so the WAL is checkpointed.
 	stop, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	// shortcut: fixed 30 min interval, make it a setting if anyone needs another.
-	go syncer.Loop(stop, 30*time.Minute)
+	// shortcut: fixed hourly interval, make it a setting if anyone needs another.
+	go syncer.Loop(stop, time.Hour)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

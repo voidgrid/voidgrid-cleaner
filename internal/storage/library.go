@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -58,9 +59,26 @@ type SyncStatus struct {
 	Items     int
 }
 
-// ReplaceMedia makes the media table exactly ms.
-func (db *DB) ReplaceMedia(ctx context.Context, ms []Media) error {
+// Section is a Plex movie or show library.
+type Section struct {
+	Key   string
+	Title string
+	Type  string // "movie" or "show"
+}
+
+// ReplaceLibrary makes the sections and media tables exactly secs (in that
+// order) and ms, in one transaction.
+func (db *DB) ReplaceLibrary(ctx context.Context, secs []Section, ms []Media) error {
 	return db.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sections`); err != nil {
+			return err
+		}
+		for i, sec := range secs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sections (section_key, title, type, position) VALUES (?, ?, ?, ?)`,
+				sec.Key, sec.Title, sec.Type, i); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM media`); err != nil {
 			return err
 		}
@@ -79,6 +97,24 @@ func (db *DB) ReplaceMedia(ctx context.Context, ms []Media) error {
 		}
 		return nil
 	})
+}
+
+// Sections returns the libraries in Plex's order.
+func (db *DB) Sections(ctx context.Context) ([]Section, error) {
+	rows, err := db.QueryContext(ctx, `SELECT section_key, title, type FROM sections ORDER BY position`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Section
+	for rows.Next() {
+		var sec Section
+		if err := rows.Scan(&sec.Key, &sec.Title, &sec.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, sec)
+	}
+	return out, rows.Err()
 }
 
 // ReplaceRequests makes the requests table exactly rs.
@@ -107,22 +143,47 @@ func (db *DB) ReplaceRequests(ctx context.Context, rs []Request) error {
 // UpsertPlays adds plays, replacing any with the same reference ID (a
 // grouped play grows when it's resumed).
 func (db *DB) UpsertPlays(ctx context.Context, ps []Play) error {
+	return db.tx(ctx, func(tx *sql.Tx) error { return insertPlays(ctx, tx, ps) })
+}
+
+// ReplacePlays makes the plays table exactly ps.
+func (db *DB) ReplacePlays(ctx context.Context, ps []Play) error {
 	return db.tx(ctx, func(tx *sql.Tx) error {
-		st, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO plays
-			(reference_id, plex_user_id, user_name, media_type, rating_key, show_rating_key, season, episode, percent, watched, stopped)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plays`); err != nil {
 			return err
 		}
-		defer func() { _ = st.Close() }()
-		for _, p := range ps {
-			if _, err := st.ExecContext(ctx, p.ReferenceID, p.PlexUserID, p.UserName, p.MediaType, p.RatingKey,
-				p.ShowRatingKey, p.Season, p.Episode, p.Percent, p.Watched, p.Stopped); err != nil {
-				return err
-			}
-		}
-		return nil
+		return insertPlays(ctx, tx, ps)
 	})
+}
+
+func insertPlays(ctx context.Context, tx *sql.Tx, ps []Play) error {
+	st, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO plays
+		(reference_id, plex_user_id, user_name, media_type, rating_key, show_rating_key, season, episode, percent, watched, stopped)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+	for _, p := range ps {
+		if _, err := st.ExecContext(ctx, p.ReferenceID, p.PlexUserID, p.UserName, p.MediaType, p.RatingKey,
+			p.ShowRatingKey, p.Season, p.Episode, p.Percent, p.Watched, p.Stopped); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LastSyncOK is when source last synced successfully, or zero if never.
+func (db *DB) LastSyncOK(ctx context.Context, source string) (time.Time, error) {
+	var n sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT last_ok FROM sync_status WHERE source = ?`, source).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !n.Valid) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(n.Int64, 0), nil
 }
 
 // LastPlayStopped is when the newest stored play ended, or zero if none.

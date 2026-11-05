@@ -71,7 +71,7 @@ func setup(t *testing.T) (*Syncer, *fakes) {
 	}
 	f := &fakes{
 		users: []seerr.User{{ID: 1, Username: "admin", PlexID: ptr[int64](500), Permissions: 2}, {ID: 7, Email: "local@x"}},
-		secs:  []plex.Section{{Key: "1", Type: "movie"}, {Key: "2", Type: "show"}, {Key: "3", Type: "artist"}},
+		secs:  []plex.Section{{Key: "2", Type: "show", Title: "TV"}, {Key: "1", Type: "movie", Title: "Films"}, {Key: "3", Type: "artist", Title: "Music"}},
 		items: map[string][]plex.Item{
 			"1": {item("10", "Zoolander", "tmdb://9398"), item("11", "Orphan Movie", "tmdb://1")},
 			"2": {item("20", "Some Show", "tvdb://299")},
@@ -123,6 +123,10 @@ func TestRunMatchesEverything(t *testing.T) {
 	if n != 3 {
 		t.Fatalf("media rows %d, want 3 (music skipped)", n)
 	}
+	secs, err := s.DB.Sections(ctx)
+	if err != nil || len(secs) != 2 || secs[0].Title != "TV" || secs[1].Key != "1" || secs[1].Type != "movie" {
+		t.Fatalf("sections %+v %v (want TV then Films, in Plex's order, no music)", secs, err)
+	}
 	got := map[int64]string{}
 	rows, _ := s.DB.Query(`SELECT seerr_request_id, coalesce(rating_key, '-') FROM requests`)
 	for rows.Next() {
@@ -173,6 +177,9 @@ func TestFailedSourceKeepsLastGoodCopy(t *testing.T) {
 			if n != 3 {
 				t.Fatalf("media rows %d after a failed sync, want the old 3", n)
 			}
+			if secs, _ := s.DB.Sections(ctx); len(secs) != 2 {
+				t.Fatalf("sections %+v after a failed sync, want the old 2", secs)
+			}
 			st, _ := s.DB.SyncStatuses(ctx)
 			for _, x := range st {
 				if x.Source == SrcLibrary && (x.LastError == "" || x.Items != 3) {
@@ -180,6 +187,51 @@ func TestFailedSourceKeepsLastGoodCopy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestIgnoredLibrarySkipped(t *testing.T) {
+	s, f := setup(t)
+	f.secs[1].Title = "Concerts" // section 1, the movies
+	s.IgnoreLibraries = []string{"concerts"}
+	s.Run(context.Background())
+	var n int
+	_ = s.DB.QueryRow(`SELECT count(*) FROM media WHERE section_key = '1'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d items from the ignored library", n)
+	}
+	_ = s.DB.QueryRow(`SELECT count(*) FROM media`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("media rows %d, want only the show", n)
+	}
+	if secs, _ := s.DB.Sections(context.Background()); len(secs) != 1 || secs[0].Key != "2" {
+		t.Fatalf("sections %+v, want only the show library", secs)
+	}
+}
+
+func TestDailyFullHistoryDropsDeletedPlays(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	s.Run(ctx) // first run: full
+	plays := func() int {
+		var n int
+		_ = s.DB.QueryRow(`SELECT count(*) FROM plays`).Scan(&n)
+		return n
+	}
+	f.plays = f.plays[:1] // a play deleted in Tautulli
+	s.Run(ctx)            // within a day: incremental, the old copy stays
+	if n := plays(); n != 2 {
+		t.Fatalf("plays %d after an incremental run, want 2", n)
+	}
+	if _, err := s.DB.Exec(`UPDATE sync_status SET last_ok = last_ok - 86400 WHERE source = ?`, SrcHistoryFull); err != nil {
+		t.Fatal(err)
+	}
+	s.Run(ctx) // a day later: full again
+	if n := plays(); n != 1 {
+		t.Fatalf("plays %d after the daily full run, want 1", n)
+	}
+	if got := f.afters[2]; !got.Equal(time.Unix(0, 0)) {
+		t.Fatalf("daily run read from %v, want everything", got)
 	}
 }
 

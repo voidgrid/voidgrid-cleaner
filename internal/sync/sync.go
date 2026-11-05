@@ -10,7 +10,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,11 +46,16 @@ type (
 
 // Source names, as shown on the sync page.
 const (
-	SrcUsers    = "seerr users"
-	SrcLibrary  = "plex library + radarr/sonarr"
-	SrcRequests = "seerr requests"
-	SrcHistory  = "tautulli history"
+	SrcUsers       = "seerr users"
+	SrcLibrary     = "plex library + radarr/sonarr"
+	SrcRequests    = "seerr requests"
+	SrcHistory     = "tautulli history"
+	SrcHistoryFull = "tautulli history (full)"
 )
+
+// fullHistoryEvery is how often history is re-read whole instead of from
+// the newest play, so plays deleted or merged in Tautulli drop out.
+const fullHistoryEvery = 24 * time.Hour
 
 // Syncer runs syncs, one at a time.
 type Syncer struct {
@@ -58,6 +65,8 @@ type Syncer struct {
 	Radarr   RadarrAPI
 	Sonarr   SonarrAPI
 	Tautulli TautulliAPI
+	// IgnoreLibraries are Plex library names to leave out (case-insensitive).
+	IgnoreLibraries []string
 
 	mu sync.Mutex
 }
@@ -83,6 +92,10 @@ func (s *Syncer) Run(ctx context.Context) bool {
 		return false
 	}
 	defer s.mu.Unlock()
+	histName, histFn := SrcHistory, s.history
+	if last, err := s.DB.LastSyncOK(ctx, SrcHistoryFull); err != nil || time.Since(last) >= fullHistoryEvery {
+		histName, histFn = SrcHistoryFull, s.fullHistory
+	}
 	// Library before requests: requests are matched to Plex items.
 	for _, step := range []struct {
 		name string
@@ -91,7 +104,7 @@ func (s *Syncer) Run(ctx context.Context) bool {
 		{SrcUsers, s.users},
 		{SrcLibrary, s.library},
 		{SrcRequests, s.requests},
-		{SrcHistory, s.history},
+		{histName, histFn},
 	} {
 		n, err := step.fn(ctx)
 		if err != nil {
@@ -144,10 +157,15 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 	}
 
 	var out []storage.Media
+	var kept []storage.Section
 	for _, sec := range secs {
 		if sec.Type != "movie" && sec.Type != "show" {
 			continue // music and photos are never cleaned
 		}
+		if slices.ContainsFunc(s.IgnoreLibraries, func(n string) bool { return strings.EqualFold(n, sec.Title) }) {
+			continue
+		}
+		kept = append(kept, storage.Section{Key: sec.Key, Title: sec.Title, Type: sec.Type})
 		items, err := s.Plex.Items(ctx, sec.Key)
 		if err != nil {
 			return 0, err
@@ -171,7 +189,7 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 			out = append(out, m)
 		}
 	}
-	return len(out), s.DB.ReplaceMedia(ctx, out)
+	return len(out), s.DB.ReplaceLibrary(ctx, kept, out)
 }
 
 func idOf(it plex.Item, agent string) sql.NullInt64 {
@@ -244,14 +262,31 @@ func (s *Syncer) history(ctx context.Context) (int, error) {
 	if !last.IsZero() {
 		after = last.AddDate(0, 0, -1)
 	}
-	ps, err := s.Tautulli.History(ctx, after)
+	out, err := s.readHistory(ctx, after)
 	if err != nil {
 		return 0, err
+	}
+	return len(out), s.DB.UpsertPlays(ctx, out)
+}
+
+// fullHistory re-reads every play and replaces the stored ones.
+func (s *Syncer) fullHistory(ctx context.Context) (int, error) {
+	out, err := s.readHistory(ctx, time.Unix(0, 0))
+	if err != nil {
+		return 0, err
+	}
+	return len(out), s.DB.ReplacePlays(ctx, out)
+}
+
+func (s *Syncer) readHistory(ctx context.Context, after time.Time) ([]storage.Play, error) {
+	ps, err := s.Tautulli.History(ctx, after)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]storage.Play, 0, len(ps))
 	for _, p := range ps {
 		if p.ReferenceID == 0 {
-			return 0, fmt.Errorf("play of rating key %d has no reference_id", p.RatingKey)
+			return nil, fmt.Errorf("play of rating key %d has no reference_id", p.RatingKey)
 		}
 		show := p.RatingKey
 		if p.MediaType == "episode" {
@@ -263,7 +298,7 @@ func (s *Syncer) history(ctx context.Context) (int, error) {
 			Percent: int(p.PercentComplete), Watched: p.WatchedStatus == 1, Stopped: int64(p.Stopped),
 		})
 	}
-	return len(out), s.DB.UpsertPlays(ctx, out)
+	return out, nil
 }
 
 func itoa(n tautulli.Int) string { return strconv.FormatInt(int64(n), 10) }

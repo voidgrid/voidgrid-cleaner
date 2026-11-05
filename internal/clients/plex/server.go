@@ -85,6 +85,14 @@ func (s *Server) EmptyTrash(ctx context.Context, sectionKey string) error {
 	return s.do(ctx, http.MethodPut, "/library/sections/"+url.PathEscape(sectionKey)+"/emptyTrash", nil)
 }
 
+// DeleteItem deletes a library item and its media files through Plex. It
+// needs "Allow media deletion" on in the server's settings. Only for items
+// no Radarr/Sonarr manages: for those, deleting behind the arr's back would
+// let it download the item again.
+func (s *Server) DeleteItem(ctx context.Context, ratingKey string) error {
+	return s.do(ctx, http.MethodDelete, "/library/metadata/"+url.PathEscape(ratingKey), nil)
+}
+
 // maxPoster caps a resized poster.
 const maxPoster = 5 << 20
 
