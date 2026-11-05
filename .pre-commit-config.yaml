@@ -1,3 +1,6 @@
+# `pre-commit install` sets up both hooks; hooks without stages run at commit only.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
@@ -7,6 +10,14 @@ repos:
   # Upstream's golangci-lint hooks build the linter with Go; this uses the installed one (Fedora package) instead.
   - repo: local
     hooks:
+      # Whole history before every push; the commit hook above only sees staged changes.
+      - id: gitleaks-history
+        name: gitleaks (history)
+        entry: gitleaks git --redact --verbose .
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
       - id: golangci-lint
         name: golangci-lint
         entry: golangci-lint run

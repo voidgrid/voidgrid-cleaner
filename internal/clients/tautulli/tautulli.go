@@ -46,6 +46,7 @@ func (n *Int) UnmarshalJSON(b []byte) error {
 // ParentMediaIndex the season and MediaIndex the episode number. UserID is
 // the plex.tv account ID, the same as Seerr's plexId.
 type Play struct {
+	ReferenceID          Int     `json:"reference_id"` // first row of a grouped play; stable as the group grows
 	UserID               Int     `json:"user_id"`
 	User                 string  `json:"user"`
 	MediaType            string  `json:"media_type"` // "movie" or "episode"
@@ -72,7 +73,8 @@ type Session struct {
 const historyPage = 1000
 
 // History returns movie and episode plays from the given day on (Tautulli
-// filters by date, inclusive), oldest first.
+// filters by date, inclusive), oldest first. Resumed sessions are grouped
+// into one play, whatever Tautulli's own grouping setting is.
 func (c *Client) History(ctx context.Context, after time.Time) ([]Play, error) {
 	var all []Play
 	for start := 0; ; start += historyPage {
@@ -80,7 +82,7 @@ func (c *Client) History(ctx context.Context, after time.Time) ([]Play, error) {
 			Data []Play `json:"data"`
 		}
 		q := url.Values{
-			"after": {after.Format("2006-01-02")}, "order_column": {"date"}, "order_dir": {"asc"},
+			"after": {after.Format("2006-01-02")}, "grouping": {"1"}, "order_column": {"date"}, "order_dir": {"asc"},
 			"start": {strconv.Itoa(start)}, "length": {strconv.Itoa(historyPage)},
 		}
 		if err := c.cmd(ctx, "get_history", q, &data); err != nil {

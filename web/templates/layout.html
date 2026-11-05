@@ -12,6 +12,7 @@
         {{if .User}}
         <nav>
             <a href="/">status</a>
+            {{if .User.IsAdmin}}<a href="/sync">sync</a>{{end}}
             <span class="muted">{{.User.Name}}{{if .User.IsAdmin}} (admin){{end}}</span>
             <form class="inline-form" method="post" action="/logout"><button type="submit">logout</button></form>
         </nav>

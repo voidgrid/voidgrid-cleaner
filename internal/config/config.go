@@ -1,32 +1,59 @@
 // Package config reads runtime configuration from environment variables.
-//
-// Seerr is configured here rather than on the settings screen because
-// sign-in depends on it: nobody can reach the settings screen without it.
+// Every service URL and key comes from here (keys typically injected by a
+// secrets manager); none are stored in the database.
 package config
 
 import (
-	"errors"
+	"fmt"
 	"os"
+	"strings"
 )
 
 // Config is the runtime configuration.
 type Config struct {
-	ListenAddr  string
-	DBPath      string
-	SeerrURL    string
-	SeerrAPIKey string
+	ListenAddr     string
+	DBPath         string
+	SeerrURL       string
+	SeerrAPIKey    string
+	PlexURL        string
+	PlexToken      string
+	RadarrURL      string
+	RadarrAPIKey   string
+	SonarrURL      string
+	SonarrAPIKey   string
+	TautulliURL    string
+	TautulliAPIKey string
 }
 
-// Load reads VGC_* variables, applying defaults.
+// Load reads VGC_* variables, applying defaults. Every service setting is
+// required.
 func Load() (Config, error) {
 	c := Config{
-		ListenAddr:  getEnv("VGC_LISTEN_ADDR", ":8790"),
-		DBPath:      getEnv("VGC_DB_PATH", "/data/voidgrid-cleaner.db"),
-		SeerrURL:    os.Getenv("VGC_SEERR_URL"),
-		SeerrAPIKey: os.Getenv("VGC_SEERR_API_KEY"),
+		ListenAddr: getEnv("VGC_LISTEN_ADDR", ":8790"),
+		DBPath:     getEnv("VGC_DB_PATH", "/data/voidgrid-cleaner.db"),
 	}
-	if c.SeerrURL == "" || c.SeerrAPIKey == "" {
-		return c, errors.New("config: VGC_SEERR_URL and VGC_SEERR_API_KEY are required")
+	var missing []string
+	for _, v := range []struct {
+		name string
+		dst  *string
+	}{
+		{"VGC_SEERR_URL", &c.SeerrURL},
+		{"VGC_SEERR_API_KEY", &c.SeerrAPIKey},
+		{"VGC_PLEX_URL", &c.PlexURL},
+		{"VGC_PLEX_TOKEN", &c.PlexToken},
+		{"VGC_RADARR_URL", &c.RadarrURL},
+		{"VGC_RADARR_API_KEY", &c.RadarrAPIKey},
+		{"VGC_SONARR_URL", &c.SonarrURL},
+		{"VGC_SONARR_API_KEY", &c.SonarrAPIKey},
+		{"VGC_TAUTULLI_URL", &c.TautulliURL},
+		{"VGC_TAUTULLI_API_KEY", &c.TautulliAPIKey},
+	} {
+		if *v.dst = os.Getenv(v.name); *v.dst == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return c, fmt.Errorf("config: required but not set: %s", strings.Join(missing, ", "))
 	}
 	return c, nil
 }

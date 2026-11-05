@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
@@ -67,9 +68,10 @@ func newTestApp(t *testing.T, plexID int64) (app *httptest.Server, client *http.
 		t.Fatal(err)
 	}
 	s := &Server{
-		DB:     db,
-		Seerr:  &seerr.Client{BaseURL: seerrSrv.URL, APIKey: "k"},
-		PlexTV: &plex.TV{BaseURL: plexSrv.URL, AppURL: "https://app.example/auth", ClientID: "cid", Product: "p"},
+		DB:      db,
+		Seerr:   &seerr.Client{BaseURL: seerrSrv.URL, APIKey: "k"},
+		PlexTV:  &plex.TV{BaseURL: plexSrv.URL, AppURL: "https://app.example/auth", ClientID: "cid", Product: "p"},
+		SyncNow: func() { syncCalls.Add(1) },
 	}
 	app = httptest.NewTLSServer(s.Router())
 	t.Cleanup(app.Close)
@@ -79,6 +81,8 @@ func newTestApp(t *testing.T, plexID int64) (app *httptest.Server, client *http.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return app, client
 }
+
+var syncCalls atomic.Int32
 
 func body(t *testing.T, resp *http.Response) string {
 	t.Helper()
@@ -193,5 +197,32 @@ func TestCrossOriginPostRefused(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("got %d", resp.StatusCode)
+	}
+}
+
+func TestSyncPageAdminOnly(t *testing.T) {
+	app, c := newTestApp(t, 200) // bob, not an admin
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := get(t, c, app.URL+"/sync"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin GET /sync: %d", resp.StatusCode)
+	}
+	before := syncCalls.Load()
+	if resp := postForm(t, c, app.URL+"/sync", nil); resp.StatusCode != http.StatusForbidden || syncCalls.Load() != before {
+		t.Fatalf("non-admin POST /sync: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/")); strings.Contains(b, `href="/sync"`) {
+		t.Fatal("non-admin sees the sync link")
+	}
+
+	app, c = newTestApp(t, 0)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if b := body(t, get(t, c, app.URL+"/sync")); !strings.Contains(b, "no sync has run yet") {
+		t.Fatalf("admin sync page: %s", b)
+	}
+	before = syncCalls.Load()
+	resp := postForm(t, c, app.URL+"/sync", nil)
+	if resp.StatusCode != http.StatusSeeOther || syncCalls.Load() != before+1 {
+		t.Fatalf("admin POST /sync: %d calls %d", resp.StatusCode, syncCalls.Load()-before)
 	}
 }

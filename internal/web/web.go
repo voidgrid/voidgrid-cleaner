@@ -36,6 +36,8 @@ type Server struct {
 	// PinWait is how long the Plex callback waits for plex.tv to report
 	// the pin approved (it can lag the redirect slightly).
 	PinWait time.Duration
+	// SyncNow starts a sync in the background.
+	SyncNow func()
 
 	limiter limiter
 }
@@ -44,13 +46,27 @@ type page struct {
 	User  *storage.User
 	Error string
 	Email string
+	Sync  *syncPage
+}
+
+type syncPage struct {
+	Statuses  []storage.SyncStatus
+	Counts    map[string]int
+	Unmatched []storage.Unmatched
+	Started   bool
 }
 
 var pages = map[string]*template.Template{}
 
 func init() {
-	for _, name := range []string{"login", "home"} {
-		pages[name] = template.Must(template.New("layout").ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
+	funcs := template.FuncMap{"when": func(unix int64) string {
+		if unix == 0 {
+			return "never"
+		}
+		return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC")
+	}}
+	for _, name := range []string{"login", "home", "sync"} {
+		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
 
@@ -86,8 +102,46 @@ func (s *Server) Router() http.Handler {
 			u := userFrom(r.Context())
 			render(w, http.StatusOK, "home", page{User: &u})
 		})
+		r.Group(func(r chi.Router) {
+			r.Use(requireAdmin)
+			r.Get("/sync", s.syncStatus)
+			r.Post("/sync", func(w http.ResponseWriter, r *http.Request) {
+				s.SyncNow()
+				http.Redirect(w, r, "/sync?started=1", http.StatusSeeOther)
+			})
+		})
 	})
 	return r
+}
+
+func (s *Server) syncStatus(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	st, err := s.DB.SyncStatuses(r.Context())
+	if err != nil {
+		log.Printf("web: sync statuses: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	counts, items, err := s.DB.SyncReport(r.Context(), 50)
+	if err != nil {
+		log.Printf("web: sync report: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "sync", page{User: &u, Sync: &syncPage{
+		Statuses: st, Counts: counts, Unmatched: items, Started: r.URL.Query().Get("started") == "1",
+	}})
+}
+
+// requireAdmin refuses non-admins; it runs after requireSession.
+func requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !userFrom(r.Context()).IsAdmin {
+			http.Error(w, "admins only", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) loginLocal(w http.ResponseWriter, r *http.Request) {

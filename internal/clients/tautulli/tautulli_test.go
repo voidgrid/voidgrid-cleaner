@@ -24,7 +24,7 @@ func fakeTautulli(t *testing.T, rows int) *Client {
 		}
 		switch q.Get("cmd") {
 		case "get_history":
-			if q.Get("after") != "2026-10-01" {
+			if q.Get("after") != "2026-10-01" || q.Get("grouping") != "1" {
 				t.Errorf("after = %q", q.Get("after"))
 			}
 			start, _ := strconv.Atoi(q.Get("start"))
@@ -32,13 +32,13 @@ func fakeTautulli(t *testing.T, rows int) *Client {
 			var out []string
 			for i := start; i < rows && i < start+length; i++ {
 				if i%2 == 0 {
-					out = append(out, fmt.Sprintf(`{"user_id":8008135,"user":"dany","media_type":"episode","rating_key":%d,
+					out = append(out, fmt.Sprintf(`{"reference_id":%d,"user_id":8008135,"user":"dany","media_type":"episode","rating_key":%d,
 						"parent_rating_key":544,"grandparent_rating_key":351,"media_index":17,"parent_media_index":7,
-						"percent_complete":84,"watched_status":1,"stopped":1462688370}`, 4000+i))
+						"percent_complete":84,"watched_status":1,"stopped":1462688370}`, 9000+i, 4000+i))
 				} else {
-					out = append(out, fmt.Sprintf(`{"user_id":8008135,"media_type":"movie","rating_key":%d,
+					out = append(out, fmt.Sprintf(`{"reference_id":"%d","user_id":8008135,"media_type":"movie","rating_key":%d,
 						"parent_rating_key":"","grandparent_rating_key":"","media_index":"","parent_media_index":"",
-						"percent_complete":40,"watched_status":0.5,"stopped":1462688370}`, 4000+i))
+						"percent_complete":40,"watched_status":0.5,"stopped":1462688370}`, 9000+i, 4000+i))
 				}
 			}
 			if start == 0 && rows > 0 {
@@ -64,10 +64,10 @@ func TestHistoryPagesAndTypes(t *testing.T) {
 	}
 	ep, mv := plays[0], plays[1]
 	if ep.MediaType != "episode" || ep.GrandparentRatingKey != 351 || ep.ParentMediaIndex != 7 || ep.MediaIndex != 17 ||
-		ep.UserID != 8008135 || ep.WatchedStatus != 1 || ep.PercentComplete != 84 {
+		ep.UserID != 8008135 || ep.WatchedStatus != 1 || ep.PercentComplete != 84 || ep.ReferenceID != 9000 {
 		t.Fatalf("episode %+v", ep)
 	}
-	if mv.MediaType != "movie" || mv.GrandparentRatingKey != 0 || mv.WatchedStatus != 0.5 {
+	if mv.MediaType != "movie" || mv.GrandparentRatingKey != 0 || mv.WatchedStatus != 0.5 || mv.ReferenceID != 9001 {
 		t.Fatalf("movie %+v", mv)
 	}
 }

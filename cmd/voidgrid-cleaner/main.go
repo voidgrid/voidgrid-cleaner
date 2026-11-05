@@ -13,10 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
 	"github.com/voidgrid/voidgrid-cleaner/internal/config"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
+	"github.com/voidgrid/voidgrid-cleaner/internal/sync"
 	"github.com/voidgrid/voidgrid-cleaner/internal/web"
 )
 
@@ -52,9 +55,20 @@ func run() error {
 	}
 
 	hc := &http.Client{Timeout: 30 * time.Second}
+	// Whole-library and whole-history reads can take longer than a page load.
+	slow := &http.Client{Timeout: 5 * time.Minute}
+	sc := &seerr.Client{BaseURL: cfg.SeerrURL, APIKey: cfg.SeerrAPIKey, HTTP: hc}
+	syncer := &sync.Syncer{
+		DB:       db,
+		Seerr:    &seerr.Client{BaseURL: cfg.SeerrURL, APIKey: cfg.SeerrAPIKey, HTTP: slow},
+		Plex:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
+		Radarr:   arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
+		Sonarr:   arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
+		Tautulli: &tautulli.Client{BaseURL: cfg.TautulliURL, APIKey: cfg.TautulliAPIKey, HTTP: slow},
+	}
 	s := &web.Server{
 		DB:      db,
-		Seerr:   &seerr.Client{BaseURL: cfg.SeerrURL, APIKey: cfg.SeerrAPIKey, HTTP: hc},
+		Seerr:   sc,
 		PlexTV:  &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
 		PinWait: 3 * time.Second,
 	}
@@ -71,6 +85,9 @@ func run() error {
 	// so the WAL is checkpointed.
 	stop, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// shortcut: fixed 30 min interval, make it a setting if anyone needs another.
+	go syncer.Loop(stop, 30*time.Minute)
+	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Printf("voidgrid-cleaner listening on %s", cfg.ListenAddr)

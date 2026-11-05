@@ -1,0 +1,42 @@
+{{define "content"}}
+<h1>sync</h1>
+{{with .Sync}}
+{{if .Started}}<div class="flash-info" role="status">sync started; reload in a minute.</div>{{end}}
+<form class="inline-form" method="post" action="/sync"><button type="submit">sync now</button></form>
+<p class="muted">runs every 30 minutes on its own.</p>
+
+<table>
+    <thead><tr><th>source</th><th>last success</th><th>items</th><th>last attempt</th><th>error</th></tr></thead>
+    <tbody>
+    {{range .Statuses}}
+    <tr>
+        <td>{{.Source}}</td>
+        <td>{{when .LastOK.Int64}}</td>
+        <td>{{.Items}}</td>
+        <td>{{when .LastRun}}</td>
+        <td>{{if .LastError}}<span class="flash-error">{{.LastError}}</span>{{else}}<span class="muted">none</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="5" class="muted">no sync has run yet.</td></tr>
+    {{end}}
+    </tbody>
+</table>
+<p class="muted">items: rows read in the last successful sync (for history, new or updated plays only).</p>
+
+<h2>not matched</h2>
+<table>
+    <thead><tr><th>what</th><th>count</th></tr></thead>
+    <tbody>
+    {{range $k, $n := .Counts}}<tr><td>{{$k}}</td><td>{{$n}}</td></tr>{{end}}
+    </tbody>
+</table>
+{{if .Unmatched}}
+<table>
+    <thead><tr><th>what</th><th>item (first 50 of each)</th></tr></thead>
+    <tbody>
+    {{range .Unmatched}}<tr><td>{{.Kind}}</td><td>{{.Name}}</td></tr>{{end}}
+    </tbody>
+</table>
+{{end}}
+{{end}}
+{{end}}

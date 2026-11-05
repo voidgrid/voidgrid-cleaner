@@ -95,7 +95,7 @@ func (c *Client) User(ctx context.Context, id int64) (User, error) {
 // UserByPlexID finds the Seerr user linked to a plex.tv account ID.
 // found is false when no Seerr user has that Plex account.
 func (c *Client) UserByPlexID(ctx context.Context, plexID int64) (u User, found bool, err error) {
-	users, err := pages[User](ctx, c, "/api/v1/user?")
+	users, err := c.Users(ctx)
 	if err != nil {
 		return User{}, false, err
 	}
@@ -105,6 +105,11 @@ func (c *Client) UserByPlexID(ctx context.Context, plexID int64) (u User, found 
 		}
 	}
 	return User{}, false, nil
+}
+
+// Users returns every Seerr user.
+func (c *Client) Users(ctx context.Context) ([]User, error) {
+	return pages[User](ctx, c, "/api/v1/user?")
 }
 
 // Requests returns every request, of any status.

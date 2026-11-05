@@ -1,15 +1,21 @@
 # Example only: adjust the network, URL and key to your setup.
+# Serve it through an HTTPS reverse proxy (see README: Deployment).
 services:
   voidgrid-cleaner:
-    image: ghcr.io/voidgrid/voidgrid-cleaner:latest
+    image: ghcr.io/voidgrid/voidgrid-cleaner:beta
     restart: unless-stopped
     ports:
       - "8790:8790"
     environment:
       VGC_SEERR_URL: http://seerr:5055
       VGC_SEERR_API_KEY: CHANGEME
+      VGC_PLEX_URL: http://192.0.2.10:32400
+      VGC_PLEX_TOKEN: CHANGEME
+      VGC_RADARR_URL: http://radarr:7878
+      VGC_RADARR_API_KEY: CHANGEME
+      VGC_SONARR_URL: http://sonarr:8989
+      VGC_SONARR_API_KEY: CHANGEME
+      VGC_TAUTULLI_URL: http://tautulli:8181
+      VGC_TAUTULLI_API_KEY: CHANGEME
     volumes:
-      - voidgrid-cleaner-data:/data
-
-volumes:
-  voidgrid-cleaner-data:
+      - ./data:/data  # must be writable by uid 1000
