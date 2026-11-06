@@ -4,8 +4,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +25,10 @@ type Config struct {
 	SonarrAPIKey   string
 	TautulliURL    string
 	TautulliAPIKey string
+	// Notifications are optional only while deletion is a dry run.
+	NotifiarrAPIKey  string
+	NotifiarrChannel int64
+	DeleteLive       bool
 }
 
 // Load reads VGC_* variables, applying defaults. Every service setting is
@@ -54,6 +60,20 @@ func Load() (Config, error) {
 	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("config: required but not set: %s", strings.Join(missing, ", "))
+	}
+	c.NotifiarrAPIKey = os.Getenv("VGC_NOTIFIARR_API_KEY")
+	if ch := os.Getenv("VGC_NOTIFIARR_CHANNEL"); ch != "" {
+		var err error
+		if c.NotifiarrChannel, err = strconv.ParseInt(ch, 10, 64); err != nil {
+			return c, errors.New("config: VGC_NOTIFIARR_CHANNEL must be a Discord channel ID")
+		}
+	}
+	if (c.NotifiarrAPIKey == "") != (c.NotifiarrChannel == 0) {
+		return c, errors.New("config: VGC_NOTIFIARR_API_KEY and VGC_NOTIFIARR_CHANNEL go together")
+	}
+	c.DeleteLive = os.Getenv("VGC_DELETE_LIVE") == "true"
+	if c.DeleteLive && c.NotifiarrAPIKey == "" {
+		return c, errors.New("config: VGC_DELETE_LIVE needs VGC_NOTIFIARR_API_KEY and VGC_NOTIFIARR_CHANNEL")
 	}
 	return c, nil
 }

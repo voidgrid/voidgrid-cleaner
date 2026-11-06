@@ -317,6 +317,8 @@ type LibraryItem struct {
 	Requesters  string // display names, comma-separated; "" if nobody requested it
 	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
 	Status      string // one of the Status constants
+	DeletionID  int64  // pending deletion, 0 if none
+	DeleteAfter int64  // its time, 0 until the notification is confirmed
 }
 
 // Item statuses. Ephemeral is for shows only.
@@ -385,8 +387,10 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
 				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
 			coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0),
-			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal')
-		FROM media m WHERE m.section_key = ?`
+			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal'),
+			coalesce(d.id, 0), coalesce(d.delete_after, 0)
+		FROM media m LEFT JOIN deletions d ON d.rating_key = m.rating_key AND d.state IN ('scheduled', 'notified', 'executing')
+		WHERE m.section_key = ?`
 	args := []any{sectionKey}
 	if !u.IsAdmin {
 		q += ` AND ` + owned
@@ -435,7 +439,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		var it LibraryItem
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
@@ -459,10 +463,19 @@ func (db *DB) SetItemStatus(ctx context.Context, ratingKey, status string, by in
 		_, err := db.ExecContext(ctx, `DELETE FROM item_status WHERE rating_key = ?`, ratingKey)
 		return err
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = excluded.set_by, set_at = excluded.set_at`,
-		ratingKey, status, by, time.Now().Unix())
-	return err
+	// Any decision other than normal replaces a pending deletion, in the same
+	// transaction so the worker can't claim it in between.
+	return db.tx(ctx, func(tx *sql.Tx) error {
+		now := time.Now().Unix()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at) VALUES (?, ?, ?, ?)
+			ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = excluded.set_by, set_at = excluded.set_at`,
+			ratingKey, status, by, now); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE deletions SET state = ?, finished_at = ? WHERE rating_key = ? AND state IN (?, ?)`,
+			DeletionCancelled, now, ratingKey, DeletionScheduled, DeletionNotified)
+		return err
+	})
 }
 
 // Thumb returns the Plex thumb path of a library item, "" if unknown.

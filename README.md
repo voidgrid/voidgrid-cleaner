@@ -4,7 +4,8 @@ A small web app for removing media from a Plex library. Users ask to keep or
 delete what they requested in Seerr, an admin approves, and the app removes it
 through Radarr/Sonarr, Seerr and Plex in an order that stops it being
 downloaded again. Status: early beta (sign-in, the sync from every service and the library
-screen with statuses and filters work; deletion is not built yet).
+screen with statuses, filters and deletion work; deletion is a dry run until
+you turn it on).
 
 ## Deployment
 
@@ -38,6 +39,9 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_SONARR_API_KEY` | yes | | Sonarr API key (Settings → General) |
 | `VGC_TAUTULLI_URL` | yes | | Tautulli URL, e.g. `http://tautulli:8181` |
 | `VGC_TAUTULLI_API_KEY` | yes | | Tautulli API key (Settings → Web Interface) |
+| `VGC_NOTIFIARR_API_KEY` | for live deletion | | Notifiarr API key |
+| `VGC_NOTIFIARR_CHANNEL` | for live deletion | | Discord channel ID for notifications |
+| `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
 | `VGC_DB_PATH` | no | `/data/voidgrid-cleaner.db` | SQLite database file |
 
@@ -79,6 +83,22 @@ which lists each Plex account in Tautulli's history that Seerr doesn't link to
 anyone. One person can have several accounts. Everything played on a linked
 account counts as that person, so leave shared accounts unlinked. Links don't
 affect sign-in.
+
+### Deletion
+
+Admins press **delete** on an item. The app posts to Discord through Notifiarr
+and deletes 24 hours after Notifiarr confirms; if the notification fails, the
+clock doesn't start. Until then the **status** screen can keep, postpone or
+cancel it. Right before deleting, the app checks that nobody is watching and
+asks Radarr and Sonarr whether they manage the item.
+
+Items Radarr or Sonarr manage are unmonitored and cleared from the queue
+before their files go, so they can't be downloaded again, then removed from
+Seerr. Anything else is deleted through Plex.
+
+Until `VGC_DELETE_LIVE=true`, everything runs as a dry run: the status screen
+shows what would have happened and nothing changes. Items scheduled during a
+dry run stay dry-run after you turn it on.
 
 ### Who can sign in
 

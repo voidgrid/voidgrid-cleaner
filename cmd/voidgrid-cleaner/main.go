@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/notifiarr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
 	"github.com/voidgrid/voidgrid-cleaner/internal/config"
+	"github.com/voidgrid/voidgrid-cleaner/internal/deleter"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 	"github.com/voidgrid/voidgrid-cleaner/internal/sync"
 	"github.com/voidgrid/voidgrid-cleaner/internal/web"
@@ -77,7 +79,21 @@ func run() error {
 		Sonarr:   arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
 		Tautulli: &tautulli.Client{BaseURL: cfg.TautulliURL, APIKey: cfg.TautulliAPIKey, HTTP: slow},
 	}
+	worker := &deleter.Worker{
+		DB:       db,
+		Radarr:   arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
+		Sonarr:   arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
+		Plex:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
+		Seerr:    sc,
+		Tautulli: &tautulli.Client{BaseURL: cfg.TautulliURL, APIKey: cfg.TautulliAPIKey, HTTP: hc},
+		DryRun:   !cfg.DeleteLive,
+		Now:      time.Now,
+	}
+	if cfg.NotifiarrAPIKey != "" {
+		worker.Notify = &notifiarr.Client{BaseURL: "https://notifiarr.com", APIKey: cfg.NotifiarrAPIKey, Channel: cfg.NotifiarrChannel, HTTP: hc}
+	}
 	s := &web.Server{
+		DryRun:  worker.DryRun,
 		DB:      db,
 		Seerr:   sc,
 		PlexTV:  &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
@@ -101,6 +117,7 @@ func run() error {
 	defer cancel()
 	// shortcut: fixed hourly interval, make it a setting if anyone needs another.
 	go syncer.Loop(stop, time.Hour)
+	go worker.Loop(stop, time.Minute)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

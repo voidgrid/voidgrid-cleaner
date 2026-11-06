@@ -179,8 +179,13 @@ code, .mono {
 
 .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
     margin: 1rem 0;
+}
+
+td .actions {
+    margin: 0;
 }
 
 /* Library tabs: one per Plex library. */
@@ -257,10 +262,6 @@ details.filters input[type="number"] {
 
 ul.cards li {
     scroll-margin-top: 1rem;
-}
-
-.details .actions {
-    flex-wrap: wrap;
 }
 
 button:disabled, button:disabled:hover {

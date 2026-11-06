@@ -35,6 +35,7 @@ const (
 
 // Server holds what the handlers need.
 type Server struct {
+	DryRun bool // deletions only log what they would do
 	DB     *storage.DB
 	Seerr  *seerr.Client
 	PlexTV *plex.TV
@@ -59,6 +60,13 @@ type page struct {
 	Libraries []storage.Section
 	Accounts  []storage.PlexAccount
 	Users     []storage.User
+	Status    *statusPage
+}
+
+type statusPage struct {
+	DryRun bool
+	Active []storage.Deletion
+	Recent []storage.Deletion
 }
 
 // PosterSource returns a Plex thumb resized to width x height as JPEG.
@@ -140,10 +148,7 @@ func (s *Server) Router() http.Handler {
 	r.Post("/logout", s.logout)
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireSession)
-		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-			u := userFrom(r.Context())
-			render(w, http.StatusOK, "home", page{User: &u})
-		})
+		r.Get("/", s.status)
 		r.Get("/library", s.library)
 		r.Get("/library/{key}", s.library)
 		r.Get("/poster/{ratingKey}", s.poster)
@@ -154,6 +159,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/users", s.users)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			// shortcut: admins only until the request flow lets users ask for changes.
+			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
+			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion(s.DB.CancelDeletion))
+			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion(s.DB.PostponeDeletion))
 			r.Post("/library/item/{ratingKey}/{status}", s.setStatus)
 			r.Post("/libraries/{key}/ignore", s.setIgnored(true))
 			r.Post("/libraries/{key}/unignore", s.setIgnored(false))
@@ -336,12 +344,86 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	backToCard(w, r, section, key)
+}
+
+// backToCard returns to where the action came from: the status screen, or
+// the item's card with the search and filters kept.
+func backToCard(w http.ResponseWriter, r *http.Request, section, key string) {
 	dest := url.URL{Path: "/library/" + section, Fragment: "card-" + key}
-	// Keep the search and filters; only the query is taken from the referrer.
+	// Only the path check and query are taken from the referrer.
 	if ref, err := url.Parse(r.Referer()); err == nil && ref.Host == r.Host {
+		if ref.Path == "/" {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
 		dest.RawQuery = ref.Query().Encode()
 	}
 	http.Redirect(w, r, dest.String(), http.StatusSeeOther)
+}
+
+// recentDeletions is how many finished deletions the status screen shows.
+const recentDeletions = 20
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	active, err := s.DB.ActiveDeletions(r.Context(), u)
+	if err != nil {
+		log.Printf("web: active deletions: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	recent, err := s.DB.RecentDeletions(r.Context(), u, recentDeletions)
+	if err != nil {
+		log.Printf("web: recent deletions: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "home", page{User: &u, Status: &statusPage{DryRun: s.DryRun, Active: active, Recent: recent}})
+}
+
+func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "ratingKey")
+	section, _, found, err := s.DB.MediaInfo(r.Context(), key)
+	if err != nil {
+		log.Printf("web: media info: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	ok, err := s.DB.ScheduleDeletion(r.Context(), key, userFrom(r.Context()).SeerrID, s.DryRun)
+	if err != nil {
+		log.Printf("web: schedule deletion: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "set to keep, or already scheduled", http.StatusConflict)
+		return
+	}
+	backToCard(w, r, section, key)
+}
+
+// changeDeletion runs a cancel or postpone. If the deletion moved on first
+// there's nothing to change, and the page shows where it is now.
+func (s *Server) changeDeletion(change func(context.Context, string) (bool, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := chi.URLParam(r, "ratingKey")
+		if _, err := change(r.Context(), key); err != nil {
+			log.Printf("web: change deletion: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		section, _, found, err := s.DB.MediaInfo(r.Context(), key)
+		if err != nil || !found { // a deletion can outlive its library item
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		backToCard(w, r, section, key)
+	}
 }
 
 // Poster size: about the details card's width at 1.5x, for high-DPI screens.

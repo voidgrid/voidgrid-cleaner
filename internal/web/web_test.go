@@ -509,3 +509,79 @@ func TestUsersPage(t *testing.T) {
 		t.Fatalf("still counted after unlink: %s", b)
 	}
 }
+
+func TestDeletionScreens(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, who requested item 10 but not 20
+	seedLibrary(t, s)
+	ctx := context.Background()
+	s.DryRun = true
+	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if ok, err := s.DB.ScheduleDeletion(ctx, "20", 1, true); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	b := body(t, get(t, c, app.URL+"/"))
+	if !strings.Contains(b, "Bobs Movie") || strings.Contains(b, "Admins Show") || strings.Contains(b, "/cancel") {
+		t.Fatalf("non-admin status: %s", b)
+	}
+	if !strings.Contains(b, "dry run: nothing") {
+		t.Fatal("no dry-run notice")
+	}
+	admin := storage.User{IsAdmin: true}
+	for _, path := range []string{"/library/item/11/delete", "/library/item/10/cancel", "/library/item/10/postpone"} {
+		if resp := postForm(t, c, app.URL+path, nil); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("non-admin POST %s: %d", path, resp.StatusCode)
+		}
+	}
+	if ds, _ := s.DB.ActiveDeletions(ctx, admin); len(ds) != 2 {
+		t.Fatalf("non-admin changed deletions: %+v", ds)
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedLibrary(t, s)
+	s.DryRun = true
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if b := body(t, get(t, c, app.URL+"/")); !strings.Contains(b, "nothing scheduled") {
+		t.Fatalf("empty status: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/10/delete", nil); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("delete: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/10/delete", nil); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("second delete: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/99/delete", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown delete: %d", resp.StatusCode)
+	}
+	ds, _ := s.DB.ActiveDeletions(ctx, admin)
+	if len(ds) != 1 || !ds[0].DryRun {
+		t.Fatalf("scheduled: %+v", ds)
+	}
+	cancel := "/library/item/10/cancel"
+	if b := body(t, get(t, c, app.URL+"/")); !strings.Contains(b, cancel) || !strings.Contains(b, "waiting for notification") {
+		t.Fatalf("status: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1")); !strings.Contains(b, cancel) || !strings.Contains(b, "/library/item/11/delete") {
+		t.Fatalf("library: %s", b)
+	}
+	// One click on the status screen keeps it and comes back there.
+	req, _ := http.NewRequest(http.MethodPost, app.URL+"/library/item/10/keep", nil)
+	req.Header.Set("Referer", app.URL+"/")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "/" {
+		t.Fatalf("keep: %d %q", resp.StatusCode, loc)
+	}
+	if ds, _ := s.DB.ActiveDeletions(ctx, admin); len(ds) != 0 {
+		t.Fatalf("keep didn't stop it: %+v", ds)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1")); strings.Contains(b, "/library/item/10/delete") {
+		t.Fatal("keep item offers delete")
+	}
+}

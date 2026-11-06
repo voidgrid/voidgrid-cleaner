@@ -45,7 +45,7 @@
         <button type="button" class="card" popovertarget="item-{{.RatingKey}}">
             <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
             <span class="card-title">{{.Title}}</span>
-            <span class="muted">{{.Year}}{{if ne .Status "normal"}} <span class="badge">{{statusName .Status}}</span>{{end}}</span>
+            <span class="muted">{{.Year}}{{if ne .Status "normal"}} <span class="badge">{{statusName .Status}}</span>{{end}}{{if .DeletionID}} <span class="badge">deleting</span>{{end}}</span>
         </button>
         <div class="details" id="item-{{.RatingKey}}" popover>
             <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
@@ -53,6 +53,7 @@
                 <h2>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</h2>
                 <dl>
                     <dt>status</dt><dd>{{statusName .Status}}</dd>
+                    {{if .DeletionID}}<dt>deleting</dt><dd>{{if .DeleteAfter}}{{when .DeleteAfter}}{{else}}waiting for notification{{end}}</dd>{{end}}
                     <dt>added</dt><dd>{{day .AddedAt}}</dd>
                     <dt>size</dt><dd>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">unknown</span>{{end}}</dd>
                     <dt>requested by</dt><dd>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</dd>
@@ -62,6 +63,8 @@
                 {{if $.User.IsAdmin}}
                 <div class="actions">
                     {{range statuses .Type}}<form class="inline-form" method="post" action="/library/item/{{$it.RatingKey}}/{{.}}"><button type="submit"{{if eq . $it.Status}} disabled{{end}}>{{statusName .}}</button></form>{{end}}
+                    {{if .DeletionID}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/cancel"><button type="submit">cancel delete</button></form>
+                    {{else if ne .Status "keep"}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/delete"><button type="submit">delete</button></form>{{end}}
                 </div>
                 {{end}}
                 <button type="button" popovertarget="item-{{.RatingKey}}" popovertargetaction="hide">close</button>
