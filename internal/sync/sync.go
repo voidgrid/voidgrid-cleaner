@@ -10,9 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -65,8 +63,6 @@ type Syncer struct {
 	Radarr   RadarrAPI
 	Sonarr   SonarrAPI
 	Tautulli TautulliAPI
-	// IgnoreLibraries are Plex library names to leave out (case-insensitive).
-	IgnoreLibraries []string
 
 	mu sync.Mutex
 }
@@ -156,16 +152,25 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 		byTvdb[sr.TvdbID] = sr
 	}
 
+	stored, err := s.DB.Sections(ctx)
+	if err != nil {
+		return 0, err
+	}
+	ignored := map[string]bool{}
+	for _, sec := range stored {
+		ignored[sec.Key] = sec.Ignored
+	}
+
 	var out []storage.Media
 	var kept []storage.Section
 	for _, sec := range secs {
 		if sec.Type != "movie" && sec.Type != "show" {
-			continue // music and photos are never cleaned
-		}
-		if slices.ContainsFunc(s.IgnoreLibraries, func(n string) bool { return strings.EqualFold(n, sec.Title) }) {
-			continue
+			continue // only video libraries: music and photos are never handled
 		}
 		kept = append(kept, storage.Section{Key: sec.Key, Title: sec.Title, Type: sec.Type})
+		if ignored[sec.Key] {
+			continue
+		}
 		items, err := s.Plex.Items(ctx, sec.Key)
 		if err != nil {
 			return 0, err

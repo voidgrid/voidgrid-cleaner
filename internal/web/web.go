@@ -51,11 +51,12 @@ type Server struct {
 }
 
 type page struct {
-	User    *storage.User
-	Error   string
-	Email   string
-	Sync    *syncPage
-	Library *libraryPage
+	User      *storage.User
+	Error     string
+	Email     string
+	Sync      *syncPage
+	Library   *libraryPage
+	Libraries []storage.Section
 }
 
 // PosterSource returns a Plex thumb resized to width x height as JPEG.
@@ -94,7 +95,7 @@ func init() {
 		},
 		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -137,6 +138,9 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)
 			r.Get("/sync", s.syncStatus)
+			r.Get("/libraries", s.libraries)
+			r.Post("/libraries/{key}/ignore", s.setIgnored(true))
+			r.Post("/libraries/{key}/unignore", s.setIgnored(false))
 			r.Post("/sync", func(w http.ResponseWriter, r *http.Request) {
 				s.SyncNow()
 				http.Redirect(w, r, "/sync?started=1", http.StatusSeeOther)
@@ -163,6 +167,37 @@ func (s *Server) syncStatus(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "sync", page{User: &u, Sync: &syncPage{
 		Statuses: st, Counts: counts, Unmatched: items, Started: r.URL.Query().Get("started") == "1",
 	}})
+}
+
+// libraries lists every video library, for ignoring and unignoring.
+func (s *Server) libraries(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	secs, err := s.DB.Sections(r.Context())
+	if err != nil {
+		log.Printf("web: sections: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "libraries", page{User: &u, Libraries: secs})
+}
+
+func (s *Server) setIgnored(ignored bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		found, err := s.DB.SetSectionIgnored(r.Context(), chi.URLParam(r, "key"), ignored)
+		if err != nil {
+			log.Printf("web: set ignored: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		if !ignored {
+			s.SyncNow() // its items were dropped when it was ignored
+		}
+		http.Redirect(w, r, "/libraries", http.StatusSeeOther)
+	}
 }
 
 // library shows one tab per visible Plex library. /library opens the first.

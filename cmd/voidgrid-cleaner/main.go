@@ -76,8 +76,6 @@ func run() error {
 		Radarr:   arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
 		Sonarr:   arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
 		Tautulli: &tautulli.Client{BaseURL: cfg.TautulliURL, APIKey: cfg.TautulliAPIKey, HTTP: slow},
-
-		IgnoreLibraries: cfg.IgnoreLibraries,
 	}
 	s := &web.Server{
 		DB:      db,

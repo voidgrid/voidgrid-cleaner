@@ -131,3 +131,35 @@ func TestLibraryOwnership(t *testing.T) {
 		t.Fatalf("admin %+v %+v", secs, items)
 	}
 }
+
+func TestIgnoredFlagSurvivesReplace(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	movies := []Media{{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "m"}}
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "Old", Type: "movie"}, {Key: "2", Title: "Gone", Type: "show"}}, movies); err != nil {
+		t.Fatal(err)
+	}
+	if found, _ := db.SetSectionIgnored(ctx, "nope", true); found {
+		t.Fatal("unknown library reported found")
+	}
+	if found, err := db.SetSectionIgnored(ctx, "1", true); err != nil || !found {
+		t.Fatalf("%v %v", found, err)
+	}
+	// A sync that read the library before it was ignored still can't bring it back.
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "New", Type: "movie"}}, movies); err != nil {
+		t.Fatal(err)
+	}
+	secs, err := db.Sections(ctx)
+	if err != nil || len(secs) != 1 || secs[0].Title != "New" || !secs[0].Ignored {
+		t.Fatalf("sections %+v %v", secs, err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT count(*) FROM media`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d items of an ignored library", n)
+	}
+	admin := User{IsAdmin: true}
+	if vis, _ := db.VisibleSections(ctx, admin); len(vis) != 0 {
+		t.Fatalf("ignored library still visible: %+v", vis)
+	}
+}

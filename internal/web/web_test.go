@@ -342,3 +342,39 @@ func TestPosterIsCached(t *testing.T) {
 		t.Fatalf("poster without a session: %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
+
+func TestLibrariesPage(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := get(t, c, app.URL+"/libraries"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin GET: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/libraries/1/ignore", nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin POST: %d", resp.StatusCode)
+	}
+	if secs, _ := s.DB.Sections(context.Background()); secs[0].Ignored {
+		t.Fatal("non-admin ignored a library")
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedLibrary(t, s)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if resp := postForm(t, c, app.URL+"/libraries/1/ignore", nil); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("ignore: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/libraries")); !strings.Contains(b, "/libraries/1/unignore") || !strings.Contains(b, "/libraries/2/ignore") {
+		t.Fatalf("libraries page: %s", b)
+	}
+	if resp := get(t, c, app.URL+"/library/1"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("ignored tab: %d", resp.StatusCode)
+	}
+	before := syncCalls.Load()
+	if resp := postForm(t, c, app.URL+"/libraries/1/unignore", nil); resp.StatusCode != http.StatusSeeOther || syncCalls.Load() != before+1 {
+		t.Fatalf("unignore: %d, syncs %d", resp.StatusCode, syncCalls.Load()-before)
+	}
+	if resp := postForm(t, c, app.URL+"/libraries/99/ignore", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown library: %d", resp.StatusCode)
+	}
+}

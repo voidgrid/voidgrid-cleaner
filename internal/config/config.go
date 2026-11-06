@@ -23,8 +23,6 @@ type Config struct {
 	SonarrAPIKey   string
 	TautulliURL    string
 	TautulliAPIKey string
-	// IgnoreLibraries are Plex library names the app never touches.
-	IgnoreLibraries []string
 }
 
 // Load reads VGC_* variables, applying defaults. Every service setting is
@@ -52,11 +50,6 @@ func Load() (Config, error) {
 	} {
 		if *v.dst = os.Getenv(v.name); *v.dst == "" {
 			missing = append(missing, v.name)
-		}
-	}
-	for _, name := range strings.Split(os.Getenv("VGC_PLEX_IGNORE_LIBRARIES"), ",") {
-		if name = strings.TrimSpace(name); name != "" {
-			c.IgnoreLibraries = append(c.IgnoreLibraries, name)
 		}
 	}
 	if len(missing) > 0 {

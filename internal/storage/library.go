@@ -64,20 +64,27 @@ type Section struct {
 	Key   string
 	Title string
 	Type  string // "movie" or "show"
+	// Ignored is set on the libraries page and survives syncs.
+	Ignored bool
 }
 
-// ReplaceLibrary makes the sections and media tables exactly secs (in that
-// order) and ms, in one transaction.
+// ReplaceLibrary makes the sections table secs (in that order, keeping each
+// library's ignored flag) and the media table ms, in one transaction. Items
+// of an ignored library are dropped, even if it was ignored mid-sync.
 func (db *DB) ReplaceLibrary(ctx context.Context, secs []Section, ms []Media) error {
 	return db.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sections`); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sections SET position = -1`); err != nil {
 			return err
 		}
 		for i, sec := range secs {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO sections (section_key, title, type, position) VALUES (?, ?, ?, ?)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sections (section_key, title, type, position) VALUES (?, ?, ?, ?)
+				ON CONFLICT (section_key) DO UPDATE SET title = excluded.title, type = excluded.type, position = excluded.position`,
 				sec.Key, sec.Title, sec.Type, i); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sections WHERE position = -1`); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM media`); err != nil {
 			return err
@@ -95,13 +102,35 @@ func (db *DB) ReplaceLibrary(ctx context.Context, secs []Section, ms []Media) er
 				return err
 			}
 		}
-		return nil
+		_, err = tx.ExecContext(ctx, `DELETE FROM media WHERE section_key IN (SELECT section_key FROM sections WHERE ignored = 1)`)
+		return err
 	})
 }
 
-// Sections returns the libraries in Plex's order.
+// SetSectionIgnored sets a library's ignored flag; found is false if there's
+// no such library. Ignoring drops its items at once, not at the next sync.
+func (db *DB) SetSectionIgnored(ctx context.Context, key string, ignored bool) (found bool, err error) {
+	err = db.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE sections SET ignored = ? WHERE section_key = ?`, ignored, key)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		found = n > 0
+		if ignored {
+			_, err = tx.ExecContext(ctx, `DELETE FROM media WHERE section_key = ?`, key)
+		}
+		return err
+	})
+	return found, err
+}
+
+// Sections returns every library, ignored ones included, in Plex's order.
 func (db *DB) Sections(ctx context.Context) ([]Section, error) {
-	rows, err := db.QueryContext(ctx, `SELECT section_key, title, type FROM sections ORDER BY position`)
+	rows, err := db.QueryContext(ctx, `SELECT section_key, title, type, ignored FROM sections ORDER BY position`)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +138,7 @@ func (db *DB) Sections(ctx context.Context) ([]Section, error) {
 	var out []Section
 	for rows.Next() {
 		var sec Section
-		if err := rows.Scan(&sec.Key, &sec.Title, &sec.Type); err != nil {
+		if err := rows.Scan(&sec.Key, &sec.Title, &sec.Type, &sec.Ignored); err != nil {
 			return nil, err
 		}
 		out = append(out, sec)
@@ -293,14 +322,14 @@ type LibraryItem struct {
 const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user_id = ? AND rating_key IS NOT NULL)`
 
 // VisibleSections lists the libraries the user may see, in Plex's order:
-// all of them for an admin, only those holding something they requested
+// every library not ignored for an admin, only those holding something they requested
 // otherwise.
 func (db *DB) VisibleSections(ctx context.Context, u User) ([]Section, error) {
-	q := `SELECT section_key, title, type FROM sections ORDER BY position`
+	q := `SELECT section_key, title, type FROM sections WHERE ignored = 0 ORDER BY position`
 	args := []any{}
 	if !u.IsAdmin {
 		q = `SELECT s.section_key, s.title, s.type FROM sections s
-			WHERE EXISTS (SELECT 1 FROM media m WHERE m.section_key = s.section_key AND ` + owned + `)
+			WHERE s.ignored = 0 AND EXISTS (SELECT 1 FROM media m WHERE m.section_key = s.section_key AND ` + owned + `)
 			ORDER BY s.position`
 		args = append(args, u.SeerrID)
 	}

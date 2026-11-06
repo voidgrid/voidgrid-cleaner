@@ -38,7 +38,6 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_SONARR_API_KEY` | yes | | Sonarr API key (Settings → General) |
 | `VGC_TAUTULLI_URL` | yes | | Tautulli URL, e.g. `http://tautulli:8181` |
 | `VGC_TAUTULLI_API_KEY` | yes | | Tautulli API key (Settings → Web Interface) |
-| `VGC_PLEX_IGNORE_LIBRARIES` | no | | Comma-separated Plex library names the app ignores, e.g. `Concerts` |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
 | `VGC_DB_PATH` | no | `/data/voidgrid-cleaner.db` | SQLite database file |
 
@@ -57,6 +56,14 @@ Tautulli history into its database; once a day it re-reads all of Tautulli's
 history, so plays deleted there drop out. Admins see each source's last result,
 errors and anything that didn't match on the **sync** page, and can start a
 sync there. It only reads; nothing is changed in any service.
+
+### Libraries
+
+Every Plex movie and show library gets a tab; music and photo libraries are
+never handled. Admins can ignore a library on the **libraries** page: it loses
+its tab and nothing in it can be deleted. Items that Radarr and Sonarr don't
+manage are deleted through Plex alone, which needs **Allow media deletion** on
+in Plex's settings.
 
 ### Who can sign in
 

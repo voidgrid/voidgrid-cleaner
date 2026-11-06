@@ -1,0 +1,19 @@
+{{define "content"}}
+<h1>libraries</h1>
+<p class="muted">ignored libraries have no tab and nothing in them can be deleted. only video libraries are listed.</p>
+<table>
+    <thead><tr><th>library</th><th>type</th><th>status</th><th><span class="visually-hidden">action</span></th></tr></thead>
+    <tbody>
+    {{range .Libraries}}
+    <tr>
+        <td>{{.Title}}</td>
+        <td>{{.Type}}</td>
+        <td>{{if .Ignored}}<span class="muted">ignored</span>{{else}}managed{{end}}</td>
+        <td><form class="inline-form" method="post" action="/libraries/{{.Key}}/{{if .Ignored}}unignore{{else}}ignore{{end}}"><button type="submit" aria-label="{{if .Ignored}}unignore{{else}}ignore{{end}} {{.Title}}">{{if .Ignored}}unignore{{else}}ignore{{end}}</button></form></td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="muted">no library has synced yet.</td></tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}

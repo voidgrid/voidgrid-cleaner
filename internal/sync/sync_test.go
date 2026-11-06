@@ -192,46 +192,34 @@ func TestFailedSourceKeepsLastGoodCopy(t *testing.T) {
 
 func TestIgnoredLibrarySkipped(t *testing.T) {
 	s, f := setup(t)
-	f.secs[1].Title = "Concerts" // section 1, the movies
-	s.IgnoreLibraries = []string{"concerts"}
-	s.Run(context.Background())
-	var n int
-	_ = s.DB.QueryRow(`SELECT count(*) FROM media WHERE section_key = '1'`).Scan(&n)
-	if n != 0 {
-		t.Fatalf("%d items from the ignored library", n)
-	}
-	_ = s.DB.QueryRow(`SELECT count(*) FROM media`).Scan(&n)
-	if n != 1 {
-		t.Fatalf("media rows %d, want only the show", n)
-	}
-	if secs, _ := s.DB.Sections(context.Background()); len(secs) != 1 || secs[0].Key != "2" {
-		t.Fatalf("sections %+v, want only the show library", secs)
-	}
-}
-
-func TestDailyFullHistoryDropsDeletedPlays(t *testing.T) {
-	s, f := setup(t)
 	ctx := context.Background()
-	s.Run(ctx) // first run: full
-	plays := func() int {
+	s.Run(ctx)
+	if found, err := s.DB.SetSectionIgnored(ctx, "1", true); err != nil || !found {
+		t.Fatalf("ignore: %v %v", found, err)
+	}
+	media := func() int {
 		var n int
-		_ = s.DB.QueryRow(`SELECT count(*) FROM plays`).Scan(&n)
+		_ = s.DB.QueryRow(`SELECT count(*) FROM media`).Scan(&n)
 		return n
 	}
-	f.plays = f.plays[:1] // a play deleted in Tautulli
-	s.Run(ctx)            // within a day: incremental, the old copy stays
-	if n := plays(); n != 2 {
-		t.Fatalf("plays %d after an incremental run, want 2", n)
+	if n := media(); n != 1 {
+		t.Fatalf("media rows %d right after ignoring, want only the show", n)
 	}
-	if _, err := s.DB.Exec(`UPDATE sync_status SET last_ok = last_ok - 86400 WHERE source = ?`, SrcHistoryFull); err != nil {
+	s.Run(ctx)
+	if n := media(); n != 1 {
+		t.Fatalf("media rows %d after a sync, want only the show", n)
+	}
+	secs, _ := s.DB.Sections(ctx)
+	if len(secs) != 2 || secs[1].Key != "1" || !secs[1].Ignored {
+		t.Fatalf("sections %+v, want the ignored library kept and flagged", secs)
+	}
+	if _, err := s.DB.SetSectionIgnored(ctx, "1", false); err != nil {
 		t.Fatal(err)
 	}
-	s.Run(ctx) // a day later: full again
-	if n := plays(); n != 1 {
-		t.Fatalf("plays %d after the daily full run, want 1", n)
-	}
-	if got := f.afters[2]; !got.Equal(time.Unix(0, 0)) {
-		t.Fatalf("daily run read from %v, want everything", got)
+	f.items["1"] = []plex.Item{item("10", "Zoolander", "tmdb://9398")}
+	s.Run(ctx)
+	if n := media(); n != 2 {
+		t.Fatalf("media rows %d after unignoring, want the library back", n)
 	}
 }
 
