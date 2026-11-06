@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>users</h1>
+<p class="muted">plex accounts in watch history that seerr doesn't link to anyone. link one and its plays count as that person's for requester watched. everything played on a linked account counts, so leave shared accounts unlinked. sign-in isn't affected.</p>
+<table>
+    <thead><tr><th>plex account</th><th>plays</th><th>last played</th><th>seerr user</th></tr></thead>
+    <tbody>
+    {{range .Accounts}}
+    {{$cur := .SeerrID}}
+    <tr>
+        <td>{{.Name}}</td>
+        <td>{{.Plays}}</td>
+        <td>{{day .LastPlayed}}</td>
+        <td><form class="inline-form" method="post" action="/users/plex/{{.PlexUserID}}">
+            <select name="seerr_user" aria-label="seerr user for {{.Name}}">
+                <option value="">not linked</option>
+                {{range $.Users}}<option value="{{.SeerrID}}"{{if eq .SeerrID $cur}} selected{{end}}>{{.Name}}</option>{{end}}
+            </select>
+            <button type="submit" aria-label="save {{.Name}}">save</button>
+        </form></td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="muted">every plex account in the watch history is linked in seerr.</td></tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}

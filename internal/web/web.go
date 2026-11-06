@@ -57,6 +57,8 @@ type page struct {
 	Sync      *syncPage
 	Library   *libraryPage
 	Libraries []storage.Section
+	Accounts  []storage.PlexAccount
+	Users     []storage.User
 }
 
 // PosterSource returns a Plex thumb resized to width x height as JPEG.
@@ -68,8 +70,7 @@ type libraryPage struct {
 	Sections []storage.Section
 	Current  storage.Section
 	Items    []storage.LibraryItem
-	Query    string
-	Sort     string
+	Filter   storage.LibraryFilter
 }
 
 type syncPage struct {
@@ -95,9 +96,18 @@ func init() {
 			}
 			return time.Unix(unix, 0).UTC().Format("2006-01-02")
 		},
+		"statusName": func(s string) string { return strings.ReplaceAll(s, "_", "-") },
+		// Ephemeral is per episode, so only shows offer it.
+		"statuses": func(mediaType string) []string {
+			out := []string{storage.StatusNormal, storage.StatusKeep, storage.StatusSpace}
+			if mediaType == "show" {
+				out = append(out, storage.StatusEphemeral)
+			}
+			return out
+		},
 		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -141,6 +151,10 @@ func (s *Server) Router() http.Handler {
 			r.Use(requireAdmin)
 			r.Get("/sync", s.syncStatus)
 			r.Get("/libraries", s.libraries)
+			r.Get("/users", s.users)
+			r.Post("/users/plex/{id}", s.setPlexAccount)
+			// shortcut: admins only until the request flow lets users ask for changes.
+			r.Post("/library/item/{ratingKey}/{status}", s.setStatus)
 			r.Post("/libraries/{key}/ignore", s.setIgnored(true))
 			r.Post("/libraries/{key}/unignore", s.setIgnored(false))
 			r.Post("/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +195,51 @@ func (s *Server) libraries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, http.StatusOK, "libraries", page{User: &u, Libraries: secs})
+}
+
+func (s *Server) users(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	accounts, err := s.DB.PlexAccounts(r.Context())
+	if err != nil {
+		log.Printf("web: plex accounts: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	users, err := s.DB.Users(r.Context())
+	if err != nil {
+		log.Printf("web: users: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "users", page{User: &u, Accounts: accounts, Users: users})
+}
+
+func (s *Server) setPlexAccount(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	// An empty choice unlinks the account.
+	var seerrID int64
+	if v := r.PostFormValue("seerr_user"); v != "" {
+		if seerrID, err = strconv.ParseInt(v, 10, 64); err != nil || seerrID == 0 {
+			http.Error(w, "bad user", http.StatusBadRequest)
+			return
+		}
+	}
+	found, err := s.DB.SetPlexAccount(r.Context(), id, seerrID, userFrom(r.Context()).SeerrID)
+	if err != nil {
+		log.Printf("web: set plex account: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
 func (s *Server) setIgnored(ignored bool) http.HandlerFunc {
@@ -230,14 +289,59 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	query, sort := strings.TrimSpace(r.URL.Query().Get("q")), r.URL.Query().Get("sort")
-	items, err := s.DB.LibraryItems(r.Context(), u, key, query, sort)
+	v := r.URL.Query()
+	days := func(name string) int {
+		n, err := strconv.Atoi(v.Get(name))
+		if err != nil || n < 0 {
+			return 0
+		}
+		return min(n, 36500) // keeps the date maths sane
+	}
+	f := storage.LibraryFilter{
+		Search: strings.TrimSpace(v.Get("q")), Sort: v.Get("sort"), Status: v.Get("status"),
+		AddedDays: days("added"), UnwatchedDays: days("unwatched"), RequesterWatched: v.Get("requester") == "1",
+	}
+	items, err := s.DB.LibraryItems(r.Context(), u, key, f)
 	if err != nil {
 		log.Printf("web: library items: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items, Query: query, Sort: sort}})
+	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items, Filter: f}})
+}
+
+// setStatus records a status for an item and returns to the same view.
+func (s *Server) setStatus(w http.ResponseWriter, r *http.Request) {
+	key, status := chi.URLParam(r, "ratingKey"), chi.URLParam(r, "status")
+	if !storage.ValidStatus(status) {
+		http.Error(w, "no such status", http.StatusBadRequest)
+		return
+	}
+	section, typ, found, err := s.DB.MediaInfo(r.Context(), key)
+	if err != nil {
+		log.Printf("web: media info: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	if status == storage.StatusEphemeral && typ != "show" {
+		http.Error(w, "only shows can be ephemeral", http.StatusBadRequest)
+		return
+	}
+	if err := s.DB.SetItemStatus(r.Context(), key, status, userFrom(r.Context()).SeerrID); err != nil {
+		log.Printf("web: set status: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	dest := url.URL{Path: "/library/" + section, Fragment: "card-" + key}
+	// Keep the search and filters; only the query is taken from the referrer.
+	if ref, err := url.Parse(r.Referer()); err == nil && ref.Host == r.Host {
+		dest.RawQuery = ref.Query().Encode()
+	}
+	http.Redirect(w, r, dest.String(), http.StatusSeeOther)
 }
 
 // Poster size: about the details card's width at 1.5x, for high-DPI screens.

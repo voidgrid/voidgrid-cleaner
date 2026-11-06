@@ -117,17 +117,17 @@ func TestLibraryOwnership(t *testing.T) {
 	if err != nil || len(secs) != 1 || secs[0].Key != "1" {
 		t.Fatalf("bob's sections %+v %v", secs, err)
 	}
-	items, err := db.LibraryItems(ctx, bob, "1", "", "")
+	items, err := db.LibraryItems(ctx, bob, "1", LibraryFilter{})
 	if err != nil || len(items) != 1 || items[0].RatingKey != "10" || items[0].Requesters != "ann, bob" || items[0].LastWatched != 500 {
 		t.Fatalf("bob's items %+v %v", items, err)
 	}
-	if items, _ := db.LibraryItems(ctx, bob, "2", "", ""); len(items) != 0 {
+	if items, _ := db.LibraryItems(ctx, bob, "2", LibraryFilter{}); len(items) != 0 {
 		t.Fatalf("bob sees %d items of a library he requested nothing in", len(items))
 	}
 
 	admin := User{SeerrID: 9, IsAdmin: true}
 	secs, _ = db.VisibleSections(ctx, admin)
-	items, _ = db.LibraryItems(ctx, admin, "1", "", "")
+	items, _ = db.LibraryItems(ctx, admin, "1", LibraryFilter{})
 	if len(secs) != 2 || len(items) != 2 || items[0].Title != "A" || items[1].Requesters != "ann, bob" {
 		t.Fatalf("admin %+v %+v", secs, items)
 	}
@@ -199,7 +199,7 @@ func TestLibrarySearchAndSort(t *testing.T) {
 		{"non-admin stays limited to their items", "alien", "", User{SeerrID: 2}, "2"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			items, err := db.LibraryItems(ctx, c.u, "1", c.search, c.sort)
+			items, err := db.LibraryItems(ctx, c.u, "1", LibraryFilter{Search: c.search, Sort: c.sort})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,5 +211,180 @@ func TestLibrarySearchAndSort(t *testing.T) {
 				t.Fatalf("got %q, want %q", s, c.want)
 			}
 		})
+	}
+}
+
+func TestLibraryFiltersAndStatus(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	day := int64(86400)
+	now := time.Now().Unix()
+	movies := []Media{
+		{RatingKey: "1", SectionKey: "1", Type: "movie", Title: "a old, requester watched", AddedAt: now - 100*day},
+		{RatingKey: "2", SectionKey: "1", Type: "movie", Title: "b old, someone else watched lately", AddedAt: now - 100*day},
+		{RatingKey: "3", SectionKey: "1", Type: "movie", Title: "c old, never watched", AddedAt: now - 100*day},
+		{RatingKey: "4", SectionKey: "1", Type: "movie", Title: "d new", AddedAt: now - day},
+	}
+	secs := []Section{{Key: "1", Title: "Movies", Type: "movie"}}
+	if err := db.ReplaceLibrary(ctx, secs, movies); err != nil {
+		t.Fatal(err)
+	}
+	u := User{SeerrID: 2, Name: "bob", PlexID: sql.NullInt64{Int64: 500, Valid: true}}
+	if err := db.UpsertUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	rk := func(k string) sql.NullString { return sql.NullString{String: k, Valid: true} }
+	if err := db.ReplaceRequests(ctx, []Request{
+		{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: rk("1")},
+		{SeerrRequestID: 2, SeerrUserID: 2, RatingKey: rk("2")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertPlays(ctx, []Play{
+		{ReferenceID: 1, PlexUserID: 500, RatingKey: "1", ShowRatingKey: "1", Watched: true, Stopped: now - 50*day},
+		{ReferenceID: 2, PlexUserID: 999, RatingKey: "2", ShowRatingKey: "2", Watched: true, Stopped: now - day},
+		{ReferenceID: 3, PlexUserID: 500, RatingKey: "2", ShowRatingKey: "2", Stopped: now - 2*day}, // started, not finished
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "3", StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "4", StatusSpace, 1); err != nil {
+		t.Fatal(err)
+	}
+	admin := User{IsAdmin: true}
+	for name, c := range map[string]struct {
+		f    LibraryFilter
+		want string
+	}{
+		"added":                {LibraryFilter{AddedDays: 30}, "1 2 3"},
+		"unwatched":            {LibraryFilter{UnwatchedDays: 30}, "1 3 4"},
+		"requester watched":    {LibraryFilter{RequesterWatched: true}, "1"},
+		"status":               {LibraryFilter{Status: StatusKeep}, "3"},
+		"normal":               {LibraryFilter{Status: StatusNormal}, "1 2"},
+		"unknown status":       {LibraryFilter{Status: "x"}, "1 2 3 4"},
+		"filters combine":      {LibraryFilter{AddedDays: 30, UnwatchedDays: 30}, "1 3"},
+		"all of them combined": {LibraryFilter{AddedDays: 30, UnwatchedDays: 30, RequesterWatched: true, Status: StatusNormal}, "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			items, err := db.LibraryItems(ctx, admin, "1", c.f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, it := range items {
+				got = append(got, it.RatingKey)
+			}
+			if s := strings.Join(got, " "); s != c.want {
+				t.Fatalf("got %q, want %q", s, c.want)
+			}
+		})
+	}
+
+	// A sync rebuilds media; the decision stays.
+	if err := db.ReplaceLibrary(ctx, secs, movies); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := db.LibraryItems(ctx, admin, "1", LibraryFilter{})
+	if items[2].Status != StatusKeep || items[0].Status != StatusNormal {
+		t.Fatalf("statuses after a sync: %q %q", items[2].Status, items[0].Status)
+	}
+	if err := db.SetItemStatus(ctx, "3", StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "4", StatusNormal, 1); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = db.LibraryItems(ctx, admin, "1", LibraryFilter{})
+	if items[2].Status != StatusEphemeral || items[3].Status != StatusNormal {
+		t.Fatalf("changed statuses: %q %q", items[2].Status, items[3].Status)
+	}
+}
+
+func TestPlexAccountLinks(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	secs := []Section{{Key: "1", Title: "Movies", Type: "movie"}}
+	movies := []Media{{RatingKey: "1", SectionKey: "1", Type: "movie", Title: "a"}}
+	if err := db.ReplaceLibrary(ctx, secs, movies); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []User{
+		{SeerrID: 2, Name: "local"},
+		{SeerrID: 3, Name: "linked", PlexID: sql.NullInt64{Int64: 700, Valid: true}},
+	} {
+		if err := db.UpsertUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rk := sql.NullString{String: "1", Valid: true}
+	if err := db.ReplaceRequests(ctx, []Request{{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: rk}}); err != nil {
+		t.Fatal(err)
+	}
+	plays := []Play{
+		{ReferenceID: 1, PlexUserID: 500, UserName: "old name", RatingKey: "1", ShowRatingKey: "1", Watched: true, Stopped: 100},
+		{ReferenceID: 2, PlexUserID: 500, UserName: "new name", RatingKey: "1", ShowRatingKey: "1", Stopped: 200},
+		{ReferenceID: 3, PlexUserID: 700, UserName: "linked", RatingKey: "1", ShowRatingKey: "1", Stopped: 200},
+	}
+	if err := db.ReplacePlays(ctx, plays); err != nil {
+		t.Fatal(err)
+	}
+	admin := User{IsAdmin: true}
+	watched := func() int {
+		t.Helper()
+		items, err := db.LibraryItems(ctx, admin, "1", LibraryFilter{RequesterWatched: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(items)
+	}
+	unlinked := func() int {
+		t.Helper()
+		counts, _, err := db.SyncReport(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return counts["Tautulli user not linked to a Seerr user"]
+	}
+	if watched() != 0 || unlinked() != 1 {
+		t.Fatalf("before link: watched %d, unlinked %d", watched(), unlinked())
+	}
+	as, err := db.PlexAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(as) != 1 || as[0].PlexUserID != 500 || as[0].Name != "new name" || as[0].Plays != 2 || as[0].LastPlayed != 200 || as[0].SeerrID != 0 {
+		t.Fatalf("accounts: %+v", as)
+	}
+
+	for name, ids := range map[string][2]int64{"unknown user": {500, 99}, "unknown account": {999, 2}} {
+		if found, err := db.SetPlexAccount(ctx, ids[0], ids[1], 1); err != nil || found {
+			t.Fatalf("%s: found %v, err %v", name, found, err)
+		}
+	}
+	if found, err := db.SetPlexAccount(ctx, 500, 2, 1); err != nil || !found {
+		t.Fatalf("link: found %v, err %v", found, err)
+	}
+	if watched() != 1 || unlinked() != 0 {
+		t.Fatalf("after link: watched %d, unlinked %d", watched(), unlinked())
+	}
+
+	// Syncs rewrite users and plays; the link stays.
+	if err := db.UpsertUser(ctx, User{SeerrID: 2, Name: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplacePlays(ctx, plays); err != nil {
+		t.Fatal(err)
+	}
+	if as, _ = db.PlexAccounts(ctx); len(as) != 1 || as[0].SeerrID != 2 || watched() != 1 {
+		t.Fatalf("after sync: %+v, watched %d", as, watched())
+	}
+
+	if found, err := db.SetPlexAccount(ctx, 500, 0, 1); err != nil || !found {
+		t.Fatalf("unlink: found %v, err %v", found, err)
+	}
+	if watched() != 0 || unlinked() != 1 {
+		t.Fatalf("after unlink: watched %d, unlinked %d", watched(), unlinked())
 	}
 }

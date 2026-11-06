@@ -395,3 +395,117 @@ func TestLibrarySearchForm(t *testing.T) {
 		t.Fatal("search text not escaped")
 	}
 }
+
+func TestSetStatus(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, who requested item 10
+	seedLibrary(t, s)
+	ctx := context.Background()
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if b := body(t, get(t, c, app.URL+"/library/1")); strings.Contains(b, "/library/item/") {
+		t.Fatal("non-admin sees status buttons")
+	}
+	// Refused even on his own item, and on someone else's, by direct POST.
+	for _, key := range []string{"10", "20"} {
+		if resp := postForm(t, c, app.URL+"/library/item/"+key+"/keep", nil); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("non-admin POST on %s: %d", key, resp.StatusCode)
+		}
+	}
+	admin := storage.User{IsAdmin: true}
+	items, _ := s.DB.LibraryItems(ctx, admin, "1", storage.LibraryFilter{Status: storage.StatusKeep})
+	if len(items) != 0 {
+		t.Fatalf("non-admin changed a status: %+v", items)
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedLibrary(t, s)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	req, _ := http.NewRequest(http.MethodPost, app.URL+"/library/item/10/keep", nil)
+	req.Header.Set("Referer", app.URL+"/library/1?q=bobs&sort=newest")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "/library/1?q=bobs&sort=newest#card-10" {
+		t.Fatalf("set status: %d %q", resp.StatusCode, loc)
+	}
+	b := body(t, get(t, c, app.URL+"/library/1?status=keep"))
+	if !strings.Contains(b, "Bobs Movie") || strings.Contains(b, "Unrequested") || !strings.Contains(b, `class="badge"`) {
+		t.Fatalf("keep filter: %s", b)
+	}
+	if strings.Contains(b, "/library/item/10/ephemeral") {
+		t.Fatal("a movie offers ephemeral")
+	}
+	if b := body(t, get(t, c, app.URL+"/library/2")); !strings.Contains(b, "/library/item/20/ephemeral") {
+		t.Fatal("a show doesn't offer ephemeral")
+	}
+	for path, want := range map[string]int{
+		"/library/item/10/ephemeral": http.StatusBadRequest, // a movie
+		"/library/item/10/nonsense":  http.StatusBadRequest,
+		"/library/item/999/keep":     http.StatusNotFound,
+		"/library/item/20/ephemeral": http.StatusSeeOther,
+		"/library/item/10/normal":    http.StatusSeeOther,
+	} {
+		if resp := postForm(t, c, app.URL+path, nil); resp.StatusCode != want {
+			t.Fatalf("%s: %d, want %d", path, resp.StatusCode, want)
+		}
+	}
+	items, _ = s.DB.LibraryItems(ctx, storage.User{IsAdmin: true}, "1", storage.LibraryFilter{})
+	if items[0].Status != storage.StatusNormal {
+		t.Fatalf("back to normal: %q", items[0].Status)
+	}
+}
+
+func TestUsersPage(t *testing.T) {
+	seedPlay := func(s *Server) {
+		t.Helper()
+		seedLibrary(t, s)
+		if err := s.DB.ReplacePlays(context.Background(), []storage.Play{
+			{ReferenceID: 1, PlexUserID: 500, UserName: "shared tv", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 100},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedPlay(s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := get(t, c, app.URL+"/users"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin GET /users: %d", resp.StatusCode)
+	}
+	form := url.Values{"seerr_user": {"2"}}
+	if resp := postForm(t, c, app.URL+"/users/plex/500", form); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin POST: %d", resp.StatusCode)
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedPlay(s)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if b := body(t, get(t, c, app.URL+"/users")); !strings.Contains(b, "shared tv") || strings.Contains(b, `value="2" selected`) {
+		t.Fatalf("users page: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/users/plex/500", form); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("link: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/users")); !strings.Contains(b, `value="2" selected`) {
+		t.Fatalf("link not shown: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1?requester=1")); !strings.Contains(b, "Bobs Movie") {
+		t.Fatalf("requester watched: %s", b)
+	}
+	for path, want := range map[string]int{"/users/plex/999": http.StatusNotFound, "/users/plex/x": http.StatusNotFound} {
+		if resp := postForm(t, c, app.URL+path, form); resp.StatusCode != want {
+			t.Fatalf("POST %s: %d", path, resp.StatusCode)
+		}
+	}
+	if resp := postForm(t, c, app.URL+"/users/plex/500", url.Values{"seerr_user": {"x"}}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad user: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/users/plex/500", url.Values{"seerr_user": {""}}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("unlink: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1?requester=1")); strings.Contains(b, "Bobs Movie") {
+		t.Fatalf("still counted after unlink: %s", b)
+	}
+}

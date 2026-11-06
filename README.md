@@ -3,8 +3,8 @@
 A small web app for removing media from a Plex library. Users ask to keep or
 delete what they requested in Seerr, an admin approves, and the app removes it
 through Radarr/Sonarr, Seerr and Plex in an order that stops it being
-downloaded again. Status: early beta (sign-in, the sync from every service and a read-only
-library screen work; statuses and deletion are not built yet).
+downloaded again. Status: early beta (sign-in, the sync from every service and the library
+screen with statuses and filters work; deletion is not built yet).
 
 ## Deployment
 
@@ -64,6 +64,21 @@ never handled. Admins can ignore a library on the **libraries** page: it loses
 its tab and nothing in it can be deleted. Items that Radarr and Sonarr don't
 manage are deleted through Plex alone, which needs **Allow media deletion** on
 in Plex's settings.
+
+### Statuses and filters
+
+Each item is normal, keep or space-based; shows can also be ephemeral. Admins
+set this in the item's details. Each library tab can filter by status, age,
+how long since anyone watched and whether a requester watched; filters combine.
+
+### Plex accounts
+
+Requester-watched needs to know which Plex account is whose. Seerr knows this
+for Plex users; for everyone else, admins link accounts on the **users** page,
+which lists each Plex account in Tautulli's history that Seerr doesn't link to
+anyone. One person can have several accounts. Everything played on a linked
+account counts as that person, so leave shared accounts unlinked. Links don't
+affect sign-in.
 
 ### Who can sign in
 

@@ -81,3 +81,81 @@ func hashToken(t string) string {
 	h := sha256.Sum256([]byte(t))
 	return hex.EncodeToString(h[:])
 }
+
+// plexLinks is every Plex account tied to a Seerr user: Seerr's own link or
+// one an admin set here.
+const plexLinks = `(SELECT plex_id AS plex_user_id, seerr_user_id FROM users WHERE plex_id IS NOT NULL
+	UNION SELECT plex_user_id, seerr_user_id FROM plex_accounts)`
+
+// PlexAccount is a Plex account seen in watch history that Seerr doesn't link
+// to anyone. SeerrID is the user an admin linked it to, 0 if none.
+type PlexAccount struct {
+	PlexUserID int64
+	Name       string
+	Plays      int
+	LastPlayed int64
+	SeerrID    int64
+}
+
+// PlexAccounts lists those accounts, most plays first.
+func (db *DB) PlexAccounts(ctx context.Context) ([]PlexAccount, error) {
+	// With max(), SQLite takes user_name from the latest play.
+	rows, err := db.QueryContext(ctx, `
+		SELECT p.plex_user_id, p.user_name, count(*), max(p.stopped), coalesce(a.seerr_user_id, 0)
+		FROM plays p LEFT JOIN plex_accounts a ON a.plex_user_id = p.plex_user_id
+		WHERE p.plex_user_id NOT IN (SELECT plex_id FROM users WHERE plex_id IS NOT NULL)
+		GROUP BY p.plex_user_id ORDER BY count(*) DESC, p.plex_user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PlexAccount
+	for rows.Next() {
+		var a PlexAccount
+		if err := rows.Scan(&a.PlexUserID, &a.Name, &a.Plays, &a.LastPlayed, &a.SeerrID); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// SetPlexAccount links a Plex account from watch history to a Seerr user, or
+// unlinks it when seerrID is 0. found is false if either doesn't exist.
+func (db *DB) SetPlexAccount(ctx context.Context, plexUserID, seerrID, by int64) (found bool, err error) {
+	if seerrID == 0 {
+		_, err = db.ExecContext(ctx, `DELETE FROM plex_accounts WHERE plex_user_id = ?`, plexUserID)
+		return err == nil, err
+	}
+	res, err := db.ExecContext(ctx, `
+		INSERT INTO plex_accounts (plex_user_id, seerr_user_id, set_by, set_at)
+		SELECT ?, seerr_user_id, ?, ? FROM users
+		WHERE seerr_user_id = ? AND EXISTS (SELECT 1 FROM plays WHERE plex_user_id = ?)
+		ON CONFLICT (plex_user_id) DO UPDATE SET
+			seerr_user_id = excluded.seerr_user_id, set_by = excluded.set_by, set_at = excluded.set_at`,
+		plexUserID, by, time.Now().Unix(), seerrID, plexUserID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// Users returns every synced user by name.
+func (db *DB) Users(ctx context.Context) ([]User, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT seerr_user_id, display_name, plex_id, is_admin, auto_approve FROM users ORDER BY display_name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.SeerrID, &u.Name, &u.PlexID, &u.IsAdmin, &u.AutoApprove); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}

@@ -218,9 +218,56 @@ form.search {
     margin-bottom: 0.5rem;
 }
 
-form.search input {
+form.search > input {
     flex: 1 1 14rem;
     max-width: 28rem;
+}
+
+details.filters {
+    flex-basis: 100%;
+}
+
+.filter-fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.75rem 1.25rem;
+    padding: 0.5rem 0;
+}
+
+.filter-fields label.check {
+    margin: 0 0 0.6rem;
+}
+
+details.filters summary {
+    cursor: pointer;
+    color: var(--fg-bright);
+}
+
+details.filters input[type="number"] {
+    width: 8rem;
+}
+
+.badge {
+    border: 1px solid var(--fg-bright);
+    color: var(--fg-bright);
+    padding: 0 0.25rem;
+    font-size: 0.8rem;
+}
+
+ul.cards li {
+    scroll-margin-top: 1rem;
+}
+
+.details .actions {
+    flex-wrap: wrap;
+}
+
+button:disabled, button:disabled:hover {
+    cursor: default;
+    background: var(--bg);
+    color: var(--fg-bright);
+    border-color: var(--fg-bright);
 }
 
 /* Library grid: a poster card per item; selecting one opens its details. */

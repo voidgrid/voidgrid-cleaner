@@ -281,8 +281,8 @@ func (db *DB) SyncReport(ctx context.Context, limit int) (counts map[string]int,
 		},
 		{
 			"Tautulli user not linked to a Seerr user",
-			`SELECT count(DISTINCT plex_user_id) FROM plays WHERE plex_user_id NOT IN (SELECT plex_id FROM users WHERE plex_id IS NOT NULL)`,
-			`SELECT DISTINCT user_name FROM plays WHERE plex_user_id NOT IN (SELECT plex_id FROM users WHERE plex_id IS NOT NULL) ORDER BY user_name LIMIT ?`,
+			`SELECT count(DISTINCT plex_user_id) FROM plays WHERE plex_user_id NOT IN (SELECT plex_user_id FROM ` + plexLinks + `)`,
+			`SELECT DISTINCT user_name FROM plays WHERE plex_user_id NOT IN (SELECT plex_user_id FROM ` + plexLinks + `) ORDER BY user_name LIMIT ?`,
 		},
 	}
 	counts = map[string]int{}
@@ -316,6 +316,31 @@ type LibraryItem struct {
 	Media
 	Requesters  string // display names, comma-separated; "" if nobody requested it
 	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
+	Status      string // one of the Status constants
+}
+
+// Item statuses. Ephemeral is for shows only.
+const (
+	StatusNormal    = "normal"
+	StatusKeep      = "keep"
+	StatusSpace     = "space_based"
+	StatusEphemeral = "ephemeral"
+)
+
+// ValidStatus reports whether s is a status.
+func ValidStatus(s string) bool {
+	return s == StatusNormal || s == StatusKeep || s == StatusSpace || s == StatusEphemeral
+}
+
+// LibraryFilter narrows and orders a library. Zero values don't filter, and
+// every filter set must match.
+type LibraryFilter struct {
+	Search           string // title contains this
+	Sort             string // "newest" or "oldest" by date added to Plex (a show's date doesn't move when episodes arrive), else title
+	Status           string // only this status
+	AddedDays        int    // added at least this many days ago
+	UnwatchedDays    int    // nobody watched it in this many days, never-watched included
+	RequesterWatched bool   // someone who requested it has watched it
 }
 
 // likeEscaper makes a search match its text literally in a LIKE pattern.
@@ -353,26 +378,46 @@ func (db *DB) VisibleSections(ctx context.Context, u User) ([]Section, error) {
 	return out, rows.Err()
 }
 
-// LibraryItems lists a library's items the user may see whose title contains
-// search (empty for all). sort is "newest" or "oldest" (by date added to
-// Plex; a show's date doesn't move when episodes arrive), else by title.
-func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey, search, sort string) ([]LibraryItem, error) {
+// LibraryItems lists a library's items the user may see that match f.
+func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f LibraryFilter) ([]LibraryItem, error) {
 	q := `SELECT m.rating_key, m.section_key, m.type, m.title, m.year, m.thumb, m.added_at, m.tmdb_id, m.tvdb_id, m.arr_id, m.size_bytes,
 			coalesce((SELECT group_concat(name, ', ') FROM (
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
 				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
-			coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0)
+			coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0),
+			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal')
 		FROM media m WHERE m.section_key = ?`
 	args := []any{sectionKey}
 	if !u.IsAdmin {
 		q += ` AND ` + owned
 		args = append(args, u.SeerrID)
 	}
-	if search != "" {
+	if f.Search != "" {
 		q += ` AND m.title LIKE ? ESCAPE '\'`
-		args = append(args, "%"+likeEscaper.Replace(search)+"%")
+		args = append(args, "%"+likeEscaper.Replace(f.Search)+"%")
 	}
-	switch sort {
+	if f.Status == StatusNormal {
+		q += ` AND NOT EXISTS (SELECT 1 FROM item_status st WHERE st.rating_key = m.rating_key)`
+	} else if ValidStatus(f.Status) {
+		q += ` AND EXISTS (SELECT 1 FROM item_status st WHERE st.rating_key = m.rating_key AND st.status = ?)`
+		args = append(args, f.Status)
+	}
+	daysAgo := func(n int) int64 { return time.Now().AddDate(0, 0, -n).Unix() }
+	if f.AddedDays > 0 {
+		q += ` AND m.added_at <= ?`
+		args = append(args, daysAgo(f.AddedDays))
+	}
+	if f.UnwatchedDays > 0 {
+		q += ` AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped > ?)`
+		args = append(args, daysAgo(f.UnwatchedDays))
+	}
+	if f.RequesterWatched {
+		q += ` AND EXISTS (SELECT 1 FROM plays p
+			JOIN ` + plexLinks + ` l ON l.plex_user_id = p.plex_user_id
+			JOIN requests r ON r.seerr_user_id = l.seerr_user_id AND r.rating_key = m.rating_key
+			WHERE p.show_rating_key = m.rating_key AND p.watched = 1)`
+	}
+	switch f.Sort {
 	case "newest":
 		q += ` ORDER BY m.added_at DESC, m.title COLLATE NOCASE`
 	case "oldest":
@@ -390,12 +435,34 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey, search, sort
 		var it LibraryItem
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
 	}
 	return out, rows.Err()
+}
+
+// MediaInfo returns a library item's section and type; found is false if
+// it's not in the library.
+func (db *DB) MediaInfo(ctx context.Context, ratingKey string) (section, typ string, found bool, err error) {
+	err = db.QueryRowContext(ctx, `SELECT section_key, type FROM media WHERE rating_key = ?`, ratingKey).Scan(&section, &typ)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	return section, typ, err == nil, err
+}
+
+// SetItemStatus records a decision about an item. Normal removes the row.
+func (db *DB) SetItemStatus(ctx context.Context, ratingKey, status string, by int64) error {
+	if status == StatusNormal {
+		_, err := db.ExecContext(ctx, `DELETE FROM item_status WHERE rating_key = ?`, ratingKey)
+		return err
+	}
+	_, err := db.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = excluded.set_by, set_at = excluded.set_at`,
+		ratingKey, status, by, time.Now().Unix())
+	return err
 }
 
 // Thumb returns the Plex thumb path of a library item, "" if unknown.

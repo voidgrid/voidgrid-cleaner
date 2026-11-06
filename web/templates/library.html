@@ -9,35 +9,61 @@
 </nav>
 {{if .Current.Key}}
 <form class="search" method="get" action="/library/{{.Current.Key}}" role="search">
-    <input type="search" name="q" value="{{.Query}}" placeholder="search titles" aria-label="search titles">
+    <input type="search" name="q" value="{{.Filter.Search}}" placeholder="search titles" aria-label="search titles">
     <select name="sort" aria-label="sort by">
-        <option value="title"{{if eq .Sort "title"}} selected{{end}}>a-z</option>
-        <option value="newest"{{if eq .Sort "newest"}} selected{{end}}>newest added</option>
-        <option value="oldest"{{if eq .Sort "oldest"}} selected{{end}}>oldest added</option>
+        <option value="title"{{if eq .Filter.Sort "title"}} selected{{end}}>a-z</option>
+        <option value="newest"{{if eq .Filter.Sort "newest"}} selected{{end}}>newest added</option>
+        <option value="oldest"{{if eq .Filter.Sort "oldest"}} selected{{end}}>oldest added</option>
     </select>
     <button type="submit">go</button>
-    {{if .Query}}<a href="/library/{{.Current.Key}}{{if .Sort}}?sort={{.Sort}}{{end}}">clear</a>{{end}}
+    {{$active := or .Filter.Status .Filter.AddedDays .Filter.UnwatchedDays .Filter.RequesterWatched}}
+    {{if or .Filter.Search $active}}<a href="/library/{{.Current.Key}}">clear</a>{{end}}
+    <details class="filters"{{if $active}} open{{end}}>
+        <summary>filters</summary>
+        <div class="filter-fields">
+        <label>status
+            <select name="status">
+                <option value="">any</option>
+                {{$cur := .Filter.Status}}{{range statuses .Current.Type}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{statusName .}}</option>{{end}}
+            </select>
+        </label>
+        <label>added at least (days ago)
+            <input type="number" name="added" min="0" value="{{if .Filter.AddedDays}}{{.Filter.AddedDays}}{{end}}">
+        </label>
+        <label>nobody watched in (days)
+            <input type="number" name="unwatched" min="0" value="{{if .Filter.UnwatchedDays}}{{.Filter.UnwatchedDays}}{{end}}">
+        </label>
+        <label class="check"><input type="checkbox" name="requester" value="1"{{if .Filter.RequesterWatched}} checked{{end}}> requester watched it</label>
+        </div>
+    </details>
 </form>
-<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Query}} matching "{{.Query}}"{{end}}.</p>
+<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Filter.Search}} matching "{{.Filter.Search}}"{{end}}.</p>
 <ul class="cards">
     {{range .Items}}
-    <li>
+    {{$it := .}}
+    <li id="card-{{.RatingKey}}">
         <button type="button" class="card" popovertarget="item-{{.RatingKey}}">
             <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
             <span class="card-title">{{.Title}}</span>
-            {{if .Year}}<span class="muted">{{.Year}}</span>{{end}}
+            <span class="muted">{{.Year}}{{if ne .Status "normal"}} <span class="badge">{{statusName .Status}}</span>{{end}}</span>
         </button>
         <div class="details" id="item-{{.RatingKey}}" popover>
             <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
             <div>
                 <h2>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</h2>
                 <dl>
+                    <dt>status</dt><dd>{{statusName .Status}}</dd>
                     <dt>added</dt><dd>{{day .AddedAt}}</dd>
                     <dt>size</dt><dd>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">unknown</span>{{end}}</dd>
                     <dt>requested by</dt><dd>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</dd>
                     <dt>last watched</dt><dd>{{day .LastWatched}}</dd>
                     {{if $.User.IsAdmin}}<dt>managed by</dt><dd>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</dd>{{end}}
                 </dl>
+                {{if $.User.IsAdmin}}
+                <div class="actions">
+                    {{range statuses .Type}}<form class="inline-form" method="post" action="/library/item/{{$it.RatingKey}}/{{.}}"><button type="submit"{{if eq . $it.Status}} disabled{{end}}>{{statusName .}}</button></form>{{end}}
+                </div>
+                {{end}}
                 <button type="button" popovertarget="item-{{.RatingKey}}" popovertargetaction="hide">close</button>
             </div>
         </div>
