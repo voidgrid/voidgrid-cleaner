@@ -8,7 +8,17 @@
     {{range .Sections}}<a href="/library/{{.Key}}"{{if eq .Key $.Library.Current.Key}} class="current" aria-current="page"{{end}}>{{.Title}}</a>{{end}}
 </nav>
 {{if .Current.Key}}
-<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}.</p>
+<form class="search" method="get" action="/library/{{.Current.Key}}" role="search">
+    <input type="search" name="q" value="{{.Query}}" placeholder="search titles" aria-label="search titles">
+    <select name="sort" aria-label="sort by">
+        <option value="title"{{if eq .Sort "title"}} selected{{end}}>a-z</option>
+        <option value="newest"{{if eq .Sort "newest"}} selected{{end}}>newest added</option>
+        <option value="oldest"{{if eq .Sort "oldest"}} selected{{end}}>oldest added</option>
+    </select>
+    <button type="submit">go</button>
+    {{if .Query}}<a href="/library/{{.Current.Key}}{{if .Sort}}?sort={{.Sort}}{{end}}">clear</a>{{end}}
+</form>
+<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Query}} matching "{{.Query}}"{{end}}.</p>
 <ul class="cards">
     {{range .Items}}
     <li>

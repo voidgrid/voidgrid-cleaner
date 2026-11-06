@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,17 +117,17 @@ func TestLibraryOwnership(t *testing.T) {
 	if err != nil || len(secs) != 1 || secs[0].Key != "1" {
 		t.Fatalf("bob's sections %+v %v", secs, err)
 	}
-	items, err := db.LibraryItems(ctx, bob, "1")
+	items, err := db.LibraryItems(ctx, bob, "1", "", "")
 	if err != nil || len(items) != 1 || items[0].RatingKey != "10" || items[0].Requesters != "ann, bob" || items[0].LastWatched != 500 {
 		t.Fatalf("bob's items %+v %v", items, err)
 	}
-	if items, _ := db.LibraryItems(ctx, bob, "2"); len(items) != 0 {
+	if items, _ := db.LibraryItems(ctx, bob, "2", "", ""); len(items) != 0 {
 		t.Fatalf("bob sees %d items of a library he requested nothing in", len(items))
 	}
 
 	admin := User{SeerrID: 9, IsAdmin: true}
 	secs, _ = db.VisibleSections(ctx, admin)
-	items, _ = db.LibraryItems(ctx, admin, "1")
+	items, _ = db.LibraryItems(ctx, admin, "1", "", "")
 	if len(secs) != 2 || len(items) != 2 || items[0].Title != "A" || items[1].Requesters != "ann, bob" {
 		t.Fatalf("admin %+v %+v", secs, items)
 	}
@@ -161,5 +162,54 @@ func TestIgnoredFlagSurvivesReplace(t *testing.T) {
 	admin := User{IsAdmin: true}
 	if vis, _ := db.VisibleSections(ctx, admin); len(vis) != 0 {
 		t.Fatalf("ignored library still visible: %+v", vis)
+	}
+}
+
+func TestLibrarySearchAndSort(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "Movies", Type: "movie"}}, []Media{
+		{RatingKey: "1", SectionKey: "1", Type: "movie", Title: "alien", AddedAt: 300},
+		{RatingKey: "2", SectionKey: "1", Type: "movie", Title: "Aliens", AddedAt: 100},
+		{RatingKey: "3", SectionKey: "1", Type: "movie", Title: "100% Wolf", AddedAt: 200},
+		{RatingKey: "4", SectionKey: "1", Type: "movie", Title: "Zoolander", AddedAt: 400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertUser(ctx, User{SeerrID: 2, Name: "bob"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplaceRequests(ctx, []Request{{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: sql.NullString{String: "2", Valid: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	admin := User{IsAdmin: true}
+	for _, c := range []struct {
+		name, search, sort string
+		u                  User
+		want               string
+	}{
+		{"title", "", "", admin, "3 1 2 4"},
+		{"unknown sort is title", "", "x; DROP TABLE media", admin, "3 1 2 4"},
+		{"newest", "", "newest", admin, "4 1 3 2"},
+		{"oldest", "", "oldest", admin, "2 3 1 4"},
+		{"any case, any position", "LIEN", "", admin, "1 2"},
+		{"search and sort", "alien", "oldest", admin, "2 1"},
+		{"percent is literal", "%", "", admin, "3"},
+		{"underscore is literal", "_", "", admin, ""},
+		{"non-admin stays limited to their items", "alien", "", User{SeerrID: 2}, "2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			items, err := db.LibraryItems(ctx, c.u, "1", c.search, c.sort)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, it := range items {
+				got = append(got, it.RatingKey)
+			}
+			if s := strings.Join(got, " "); s != c.want {
+				t.Fatalf("got %q, want %q", s, c.want)
+			}
+		})
 	}
 }

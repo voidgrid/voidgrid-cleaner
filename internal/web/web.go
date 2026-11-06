@@ -68,6 +68,8 @@ type libraryPage struct {
 	Sections []storage.Section
 	Current  storage.Section
 	Items    []storage.LibraryItem
+	Query    string
+	Sort     string
 }
 
 type syncPage struct {
@@ -228,13 +230,14 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	items, err := s.DB.LibraryItems(r.Context(), u, key)
+	query, sort := strings.TrimSpace(r.URL.Query().Get("q")), r.URL.Query().Get("sort")
+	items, err := s.DB.LibraryItems(r.Context(), u, key, query, sort)
 	if err != nil {
 		log.Printf("web: library items: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items}})
+	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items, Query: query, Sort: sort}})
 }
 
 // Poster size: about the details card's width at 1.5x, for high-DPI screens.

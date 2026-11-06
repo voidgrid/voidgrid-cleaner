@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -317,6 +318,9 @@ type LibraryItem struct {
 	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
 }
 
+// likeEscaper makes a search match its text literally in a LIKE pattern.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // owned limits a query to items the user requested (any status). It is
 // the server-side ownership rule: non-admins only ever see or act on these.
 const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user_id = ? AND rating_key IS NOT NULL)`
@@ -349,8 +353,10 @@ func (db *DB) VisibleSections(ctx context.Context, u User) ([]Section, error) {
 	return out, rows.Err()
 }
 
-// LibraryItems lists a library's items the user may see, by title.
-func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string) ([]LibraryItem, error) {
+// LibraryItems lists a library's items the user may see whose title contains
+// search (empty for all). sort is "newest" or "oldest" (by date added to
+// Plex; a show's date doesn't move when episodes arrive), else by title.
+func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey, search, sort string) ([]LibraryItem, error) {
 	q := `SELECT m.rating_key, m.section_key, m.type, m.title, m.year, m.thumb, m.added_at, m.tmdb_id, m.tvdb_id, m.arr_id, m.size_bytes,
 			coalesce((SELECT group_concat(name, ', ') FROM (
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
@@ -362,7 +368,18 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string) ([]Li
 		q += ` AND ` + owned
 		args = append(args, u.SeerrID)
 	}
-	q += ` ORDER BY m.title COLLATE NOCASE, m.year`
+	if search != "" {
+		q += ` AND m.title LIKE ? ESCAPE '\'`
+		args = append(args, "%"+likeEscaper.Replace(search)+"%")
+	}
+	switch sort {
+	case "newest":
+		q += ` ORDER BY m.added_at DESC, m.title COLLATE NOCASE`
+	case "oldest":
+		q += ` ORDER BY m.added_at, m.title COLLATE NOCASE`
+	default:
+		q += ` ORDER BY m.title COLLATE NOCASE, m.year`
+	}
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

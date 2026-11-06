@@ -210,6 +210,19 @@ nav.tabs a:hover {
     color: var(--fg-bright);
 }
 
+form.search {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+form.search input {
+    flex: 1 1 14rem;
+    max-width: 28rem;
+}
+
 /* Library grid: a poster card per item; selecting one opens its details. */
 main:has(ul.cards) {
     max-width: 1600px;

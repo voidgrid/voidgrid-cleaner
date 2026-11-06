@@ -381,3 +381,17 @@ func TestLibrariesPage(t *testing.T) {
 		t.Fatalf("unknown library: %d", resp.StatusCode)
 	}
 }
+
+func TestLibrarySearchForm(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	b := body(t, get(t, c, app.URL+"/library/1?q=bobs&sort=newest"))
+	if !strings.Contains(b, "Bobs Movie") || strings.Contains(b, "Unrequested") || !strings.Contains(b, `value="bobs"`) ||
+		!strings.Contains(b, `value="newest" selected`) || !strings.Contains(b, `matching`) {
+		t.Fatalf("search page: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+`/library/1?q=%3Cscript%3E`)); strings.Contains(b, "<script>") {
+		t.Fatal("search text not escaped")
+	}
+}
