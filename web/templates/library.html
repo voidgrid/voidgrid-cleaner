@@ -9,25 +9,31 @@
 </nav>
 {{if .Current.Key}}
 <p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}.</p>
-<table class="library">
-    <thead><tr>
-        <th><span class="visually-hidden">poster</span></th><th>title</th><th>added</th><th>size</th>
-        <th>requested by</th><th>last watched</th>{{if $.User.IsAdmin}}<th>managed by</th>{{end}}
-    </tr></thead>
-    <tbody>
+<ul class="cards">
     {{range .Items}}
-    <tr>
-        <td><img class="poster" src="/poster/{{.RatingKey}}" alt="" width="60" height="90" loading="lazy"></td>
-        <td>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</td>
-        <td>{{day .AddedAt}}</td>
-        <td>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">?</span>{{end}}</td>
-        <td>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</td>
-        <td>{{day .LastWatched}}</td>
-        {{if $.User.IsAdmin}}<td>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</td>{{end}}
-    </tr>
+    <li>
+        <button type="button" class="card" popovertarget="item-{{.RatingKey}}">
+            <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
+            <span class="card-title">{{.Title}}</span>
+            {{if .Year}}<span class="muted">{{.Year}}</span>{{end}}
+        </button>
+        <div class="details" id="item-{{.RatingKey}}" popover>
+            <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
+            <div>
+                <h2>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</h2>
+                <dl>
+                    <dt>added</dt><dd>{{day .AddedAt}}</dd>
+                    <dt>size</dt><dd>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">unknown</span>{{end}}</dd>
+                    <dt>requested by</dt><dd>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</dd>
+                    <dt>last watched</dt><dd>{{day .LastWatched}}</dd>
+                    {{if $.User.IsAdmin}}<dt>managed by</dt><dd>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</dd>{{end}}
+                </dl>
+                <button type="button" popovertarget="item-{{.RatingKey}}" popovertargetaction="hide">close</button>
+            </div>
+        </div>
+    </li>
     {{end}}
-    </tbody>
-</table>
+</ul>
 {{end}}
 {{end}}
 {{end}}

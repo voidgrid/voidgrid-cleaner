@@ -237,8 +237,8 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items}})
 }
 
-// Poster size on the library screen (2x for sharp high-DPI screens).
-const posterW, posterH = 120, 180
+// Poster size: about the details card's width at 1.5x, for high-DPI screens.
+const posterW, posterH = 240, 360
 
 // poster serves a library item's poster from the disk cache, fetching it
 // from Plex the first time. Any signed-in user may see any poster: artwork
@@ -256,7 +256,7 @@ func (s *Server) poster(w http.ResponseWriter, r *http.Request) {
 	}
 	// The thumb path changes when the artwork does, so it names the file.
 	sum := sha256.Sum256([]byte(thumb))
-	name := hex.EncodeToString(sum[:]) + ".jpg"
+	name := hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(posterW) + ".jpg"
 	b, err := s.PosterCache.ReadFile(name)
 	if err != nil {
 		if b, err = s.Posters.Poster(r.Context(), thumb, posterW, posterH); err != nil {

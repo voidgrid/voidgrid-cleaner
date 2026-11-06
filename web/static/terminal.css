@@ -210,14 +210,113 @@ nav.tabs a:hover {
     color: var(--fg-bright);
 }
 
-table.library td {
-    vertical-align: middle;
+/* Library grid: a poster card per item; selecting one opens its details. */
+main:has(ul.cards) {
+    max-width: 1600px;
+}
+
+ul.cards {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 1rem;
+}
+
+button.card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--fg);
+    font-weight: normal;
+    font-size: 0.9rem;
+    text-align: left;
+}
+
+button.card:hover {
+    background: none;
+    color: var(--fg-bright);
+}
+
+button.card:hover img.poster {
+    border-color: var(--fg-bright);
+}
+
+button.card:focus-visible {
+    outline: 2px solid var(--fg-bright);
+    outline-offset: 2px;
+}
+
+.card-title {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 img.poster {
     display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
     border: 1px solid var(--border);
-    background: var(--fg-dim);
+    background: #0a1f10;
+}
+
+.details {
+    width: min(36rem, 92vw);
+    max-height: 90vh;
+    overflow: auto;
+    padding: 1rem;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--fg-bright);
+}
+
+.details:popover-open {
+    display: flex;
+    gap: 1rem;
+}
+
+.details::backdrop {
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.details img.poster {
+    width: 11rem;
+    flex: none;
+    align-self: flex-start;
+}
+
+.details h2 {
+    margin-top: 0;
+}
+
+.details dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 1rem;
+    margin: 0 0 1rem;
+}
+
+.details dt {
+    color: var(--fg-dim);
+}
+
+.details dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 30rem) {
+    .details:popover-open {
+        flex-direction: column;
+    }
 }
 
 .visually-hidden {

@@ -306,6 +306,9 @@ func TestLibraryTabsAndOwnership(t *testing.T) {
 		!strings.Contains(b, "plex only") || !strings.Contains(b, "bob") {
 		t.Fatalf("admin's library page: %s", b)
 	}
+	if !strings.Contains(b, `popovertarget="item-10"`) || !strings.Contains(b, `id="item-10"`) {
+		t.Fatalf("card not wired to its details: %s", b)
+	}
 	if i, j := strings.Index(b, `href="/library/1"`), strings.Index(b, `href="/library/2"`); i < 0 || j < i {
 		t.Fatal("tabs not in Plex's order")
 	}
