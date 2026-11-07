@@ -1,0 +1,23 @@
+{{define "content"}}
+<h1>log</h1>
+{{with .Log}}
+<form class="search" method="get" action="/log" role="search">
+    <input type="search" name="q" value="{{.Search}}" placeholder="search who, what or item" aria-label="search the log">
+    <button type="submit">go</button>
+    {{if .Search}}<a href="/log">clear</a>{{end}}
+</form>
+<div data-live>
+<table>
+    <thead><tr><th>when</th><th>who</th><th>what</th><th>item</th><th>detail</th></tr></thead>
+    <tbody>
+    {{range .Entries}}
+    <tr><td>{{when .At}}</td><td>{{.Who}}</td><td>{{.Action}}</td><td>{{.Item}}</td><td class="muted">{{.Detail}}</td></tr>
+    {{else}}
+    <tr><td colspan="5" class="muted">nothing logged{{if $.Log.Search}} matching that{{end}}.</td></tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+{{if .More}}<a href="{{.More}}">older</a>{{end}}
+{{end}}
+{{end}}

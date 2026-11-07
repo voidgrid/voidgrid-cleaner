@@ -154,6 +154,22 @@ func pages[T any](ctx context.Context, c *Client, prefix string) ([]T, error) {
 	}
 }
 
+// Title names something by its TMDB ID, for what the library no longer has.
+// mediaType is "movie" or "tv".
+func (c *Client) Title(ctx context.Context, mediaType string, tmdbID int64) (string, error) {
+	var out struct {
+		Title string `json:"title"`
+		Name  string `json:"name"`
+	}
+	if err := c.call(ctx, http.MethodGet, fmt.Sprintf("/api/v1/%s/%d", mediaType, tmdbID), true, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Title != "" {
+		return out.Title, nil
+	}
+	return out.Name, nil
+}
+
 func (c *Client) call(ctx context.Context, method, path string, withKey bool, body, out any) error {
 	hdr := http.Header{}
 	if withKey {

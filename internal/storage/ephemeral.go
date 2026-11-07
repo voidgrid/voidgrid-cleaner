@@ -187,13 +187,13 @@ func (db *DB) WatchedEpisodes(ctx context.Context, dryRun bool) ([]WatchedEpisod
 		FROM item_status st
 		JOIN media m ON m.rating_key = st.rating_key AND m.arr_id IS NOT NULL
 		JOIN sections s ON s.section_key = m.section_key AND s.ignored = 0
-		JOIN plays p ON p.show_rating_key = m.rating_key AND p.media_type = 'episode' AND p.watched = 1
+		JOIN plays p ON p.show_rating_key = m.rating_key AND p.media_type = 'episode' AND p.watched = 1 AND p.stopped >= m.added_at
 		WHERE st.status = ?
 			AND EXISTS (SELECT 1 FROM `+showWatchers+` w WHERE w.rating_key = m.rating_key)
 			AND NOT EXISTS (SELECT 1 FROM `+showWatchers+` w WHERE w.rating_key = m.rating_key AND NOT EXISTS (
 				SELECT 1 FROM plays q JOIN `+plexLinks+` l ON l.plex_user_id = q.plex_user_id
 				WHERE l.seerr_user_id = w.seerr_user_id AND q.show_rating_key = m.rating_key
-					AND q.season = p.season AND q.episode = p.episode AND q.watched = 1))
+					AND q.season = p.season AND q.episode = p.episode AND q.watched = 1 AND q.stopped >= m.added_at))
 			AND NOT EXISTS (SELECT 1 FROM deletions d WHERE d.parent_key = m.rating_key
 				AND d.season = p.season AND d.episode = p.episode AND d.dry_run = ?)
 		GROUP BY m.rating_key, p.season, p.episode

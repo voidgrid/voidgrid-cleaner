@@ -28,6 +28,7 @@ import (
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/discord"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/doctor"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 	webassets "github.com/voidgrid/voidgrid-cleaner/web"
 )
@@ -52,6 +53,8 @@ type Server struct {
 	PinWait time.Duration
 	// SyncNow starts a sync in the background.
 	SyncNow func()
+	// DoctorNow starts a doctor run in the background.
+	DoctorNow func()
 	// Posters resizes Plex artwork; PosterCache holds the results on disk.
 	Posters     PosterSource
 	PosterCache *os.Root
@@ -72,16 +75,40 @@ type page struct {
 	Status    *statusPage
 	Settings  *settingsPage
 	Ephemeral []storage.EphemeralShow
+	Doctor    *doctorPage
+	Log       *logPage
+}
+
+type doctorPage struct {
+	Groups         []findingGroup
+	Dismissed      bool
+	DismissedCount int
+}
+
+type findingGroup struct {
+	Label    string
+	Findings []storage.Finding
+}
+
+type logPage struct {
+	Entries []storage.AuditEntry
+	Search  string
+	More    string
 }
 
 type settingsPage struct {
-	Window       storage.DeleteWindow
-	Zone         string
-	SpaceLimit   string
-	DefaultSpace int
-	DefaultWin   storage.DeleteWindow
-	AdminDiscord string
-	Saved        bool
+	Window        storage.DeleteWindow
+	Zone          string
+	SpaceLimit    string
+	DefaultSpace  int
+	DefaultWin    storage.DeleteWindow
+	AdminDiscord  string
+	LogExpiry     string
+	LogLevel      string
+	DefaultLevel  string
+	DefaultExpiry int
+	Paths         []storage.LibraryPath
+	Saved         bool
 }
 
 type statusPage struct {
@@ -141,7 +168,7 @@ func init() {
 		},
 		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "log"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -189,13 +216,18 @@ func (s *Server) Router() http.Handler {
 			r.Get("/libraries", s.libraries)
 			r.Get("/users", s.users)
 			r.Get("/settings", s.settings)
+			r.Get("/doctor", s.doctor)
+			r.Post("/doctor/check", s.doctorCheck)
+			r.Post("/doctor/{id}/dismiss", s.setFinding("dismissed"))
+			r.Post("/doctor/{id}/open", s.setFinding("open"))
+			r.Get("/log", s.auditLog)
 			r.Post("/settings", s.saveSettings)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			r.Post("/users/discord/{id}", s.setDiscordUser)
 			// shortcut: admins only until the request flow lets users ask for changes.
 			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
-			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion(s.DB.CancelDeletion))
-			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion(s.DB.PostponeDeletion))
+			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion("cancel deletion", s.DB.CancelDeletion))
+			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion("postpone deletion", s.DB.PostponeDeletion))
 			r.Post("/library/item/{ratingKey}/{status}", s.setStatus)
 			r.Post("/libraries/{key}/ignore", s.setIgnored(true))
 			r.Post("/libraries/{key}/unignore", s.setIgnored(false))
@@ -282,6 +314,7 @@ func (s *Server) setDiscordUser(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "link discord user", chi.URLParam(r, "id"), "seerr user "+strconv.FormatInt(seerrID, 10))
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
@@ -345,6 +378,9 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 	}
 	if isJoin {
 		title, result, err := s.DB.JoinFromDiscord(r.Context(), show, in.Member.User.ID, name)
+		if err == nil && result != storage.JoinGone {
+			s.DB.Audit(r.Context(), "discord: "+name, "add me", title, "")
+		}
 		switch {
 		case err != nil:
 			log.Printf("web: discord join: %v", err)
@@ -368,6 +404,7 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 		private("Too late: that deletion isn't waiting any more.")
 		return
 	}
+	s.DB.Audit(r.Context(), "discord: "+name, "keep", title, "")
 	// Update the message, dropping the button. Mentions stay off for the name too.
 	reply(map[string]any{"type": 7, "data": map[string]any{
 		"content": "**" + title + "** was kept by " + name + ".", "components": []any{},
@@ -400,6 +437,7 @@ func (s *Server) setPlexAccount(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "link plex account", strconv.FormatInt(id, 10), "seerr user "+strconv.FormatInt(seerrID, 10))
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
@@ -415,6 +453,7 @@ func (s *Server) setIgnored(ignored bool) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "set library ignored", chi.URLParam(r, "key"), strconv.FormatBool(ignored))
 		if !ignored {
 			s.SyncNow() // its items were dropped when it was ignored
 		}
@@ -527,6 +566,7 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "set status", key, status)
 	backToCard(w, r, section, key)
 }
 
@@ -560,12 +600,96 @@ func (s *Server) ephemeral(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) joinEphemeral(w http.ResponseWriter, r *http.Request) {
 	// False means it stopped being ephemeral; the list shows that.
-	if _, err := s.DB.AddWatcher(r.Context(), chi.URLParam(r, "ratingKey"), userFrom(r.Context()).SeerrID); err != nil {
+	key := chi.URLParam(r, "ratingKey")
+	added, err := s.DB.AddWatcher(r.Context(), key, userFrom(r.Context()).SeerrID)
+	if err != nil {
 		log.Printf("web: join ephemeral: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if added {
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "add me", key, "")
+	}
 	http.Redirect(w, r, "/ephemeral", http.StatusSeeOther)
+}
+
+func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	dismissed := r.URL.Query().Get("dismissed") == "1"
+	state := "open"
+	if dismissed {
+		state = "dismissed"
+	}
+	fs, err := s.DB.Findings(r.Context(), state)
+	if err != nil {
+		log.Printf("web: findings: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	other, err := s.DB.Findings(r.Context(), "dismissed")
+	if err != nil {
+		log.Printf("web: findings: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other)}
+	for _, l := range doctor.Labels {
+		g := findingGroup{Label: l.Label}
+		for _, f := range fs {
+			if f.Kind == l.Kind {
+				g.Findings = append(g.Findings, f)
+			}
+		}
+		if len(g.Findings) > 0 {
+			p.Groups = append(p.Groups, g)
+		}
+	}
+	render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
+}
+
+func (s *Server) doctorCheck(w http.ResponseWriter, r *http.Request) {
+	if s.DoctorNow != nil {
+		s.DoctorNow()
+	}
+	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
+}
+
+func (s *Server) setFinding(state string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := s.DB.SetFindingState(r.Context(), id, state); err != nil {
+			log.Printf("web: set finding: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "doctor finding "+state, chi.URLParam(r, "id"), "")
+		http.Redirect(w, r, "/doctor", http.StatusSeeOther)
+	}
+}
+
+const logPageSize = 100
+
+func (s *Server) auditLog(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	offset = max(offset, 0)
+	entries, err := s.DB.AuditLog(r.Context(), q, logPageSize+1, offset)
+	if err != nil {
+		log.Printf("web: audit log: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	p := &logPage{Entries: entries, Search: q}
+	if len(entries) > logPageSize {
+		p.Entries = entries[:logPageSize]
+		p.More = "/log?" + url.Values{"q": {q}, "offset": {strconv.Itoa(offset + logPageSize)}}.Encode()
+	}
+	render(w, http.StatusOK, "log", page{User: &u, Log: p})
 }
 
 // recentDeletions is how many finished deletions the status screen shows.
@@ -610,18 +734,23 @@ func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "set to keep, or already scheduled", http.StatusConflict)
 		return
 	}
+	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "schedule deletion", key, "")
 	backToCard(w, r, section, key)
 }
 
 // changeDeletion runs a cancel or postpone. If the deletion moved on first
 // there's nothing to change, and the page shows where it is now.
-func (s *Server) changeDeletion(change func(context.Context, string) (bool, error)) http.HandlerFunc {
+func (s *Server) changeDeletion(action string, change func(context.Context, string) (bool, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := chi.URLParam(r, "ratingKey")
-		if _, err := change(r.Context(), key); err != nil {
+		did, err := change(r.Context(), key)
+		if err != nil {
 			log.Printf("web: change deletion: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if did {
+			s.DB.Audit(r.Context(), userFrom(r.Context()).Name, action, key, "")
 		}
 		section, _, found, err := s.DB.MediaInfo(r.Context(), key)
 		if err != nil || !found { // a deletion can outlive its library item
@@ -753,9 +882,28 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	expiry, err := s.DB.LogExpiry(r.Context())
+	if err != nil {
+		log.Printf("web: log expiry: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	level, err := s.DB.LogLevel(r.Context())
+	if err != nil {
+		log.Printf("web: log level: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	paths, err := s.DB.LibraryPaths(r.Context())
+	if err != nil {
+		log.Printf("web: library paths: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	render(w, http.StatusOK, "settings", page{User: &u, Settings: &settingsPage{
+		LogLevel: level, DefaultLevel: storage.DefaultLogLevel,
 		Window: win, Zone: time.Now().Format("MST"), SpaceLimit: strconv.Itoa(limit), DefaultSpace: storage.DefaultSpaceLimit,
-		DefaultWin: storage.DefaultWindow, AdminDiscord: admin, Saved: r.URL.Query().Get("saved") == "1",
+		DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: strconv.Itoa(expiry), DefaultExpiry: storage.DefaultLogExpiry, Paths: paths, Saved: r.URL.Query().Get("saved") == "1",
 	}})
 }
 
@@ -771,12 +919,30 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = storage.ValidAdminDiscord(admin)
 	}
+	expiryForm := r.PostFormValue("log_expiry")
+	var expiry int
+	if err == nil {
+		expiry, err = storage.ParseLogExpiry(expiryForm)
+	}
+	levelForm := r.PostFormValue("log_level")
+	var level string
+	if err == nil {
+		level, err = storage.ParseLogLevel(levelForm)
+	}
 	if err != nil {
 		u := userFrom(r.Context())
+		// The form must keep listing the paths, or the next save would unmanage them all.
+		paths, perr := s.DB.LibraryPaths(r.Context())
+		if perr != nil {
+			log.Printf("web: library paths: %v", perr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		// A 200: a typo here shouldn't count towards a proxy ban.
 		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{
+			LogLevel: levelForm, DefaultLevel: storage.DefaultLogLevel,
 			Window: win, Zone: time.Now().Format("MST"), SpaceLimit: spaceForm, DefaultSpace: storage.DefaultSpaceLimit,
-			DefaultWin: storage.DefaultWindow, AdminDiscord: admin,
+			DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: expiryForm, DefaultExpiry: storage.DefaultLogExpiry, Paths: paths,
 		}})
 		return
 	}
@@ -787,11 +953,21 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = s.DB.SetAdminDiscord(r.Context(), admin)
 	}
+	if err == nil {
+		err = s.DB.SetLogExpiry(r.Context(), expiry)
+	}
+	if err == nil {
+		err = s.DB.SetLogLevel(r.Context(), level)
+	}
+	if err == nil {
+		err = s.DB.SetManagedPaths(r.Context(), r.PostForm["managed"])
+	}
 	if err != nil {
 		log.Printf("web: save settings: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "save settings", "", "")
 	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
 }
 

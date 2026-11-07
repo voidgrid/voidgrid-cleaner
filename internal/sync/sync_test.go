@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -15,16 +16,32 @@ import (
 )
 
 type fakes struct {
-	users    []seerr.User
-	reqs     []seerr.Request
-	secs     []plex.Section
-	items    map[string][]plex.Item
-	movies   []arr.Movie
-	series   []arr.Series
-	plays    []tautulli.Play
-	afters   []time.Time
-	failArr  bool
-	failPlex bool
+	users     []seerr.User
+	reqs      []seerr.Request
+	secs      []plex.Section
+	items     map[string][]plex.Item
+	movies    []arr.Movie
+	series    []arr.Series
+	plays     []tautulli.Play
+	afters    []time.Time
+	failArr   bool
+	failPlex  bool
+	views     []plex.View
+	failViews bool
+	showPaths map[string]string
+}
+
+func (f *fakes) ShowPath(_ context.Context, key string) (string, error) { return f.showPaths[key], nil }
+
+func (f *fakes) ViewHistory(context.Context) ([]plex.View, error) {
+	if f.failViews {
+		return nil, errors.New("plex history down")
+	}
+	return f.views, nil
+}
+
+func (f *fakes) Accounts(context.Context) ([]plex.ServerAccount, error) {
+	return []plex.ServerAccount{{ID: 1, Name: "owner"}, {ID: 77, Name: "kid"}}, nil
 }
 
 func (f *fakes) Users(context.Context) ([]seerr.User, error)       { return f.users, nil }
@@ -105,7 +122,8 @@ func setup(t *testing.T) (*Syncer, *fakes) {
 			{ReferenceID: 2, UserID: 999, User: "stranger", MediaType: "movie", RatingKey: 10, PercentComplete: 30, Stopped: 1_700_000_000},
 		},
 	}
-	return &Syncer{DB: db, Seerr: f, Plex: f, Radarr: f, Sonarr: f, Tautulli: f}, f
+	owner := func(context.Context) (int64, error) { return 500, nil }
+	return &Syncer{DB: db, Seerr: f, Plex: f, Radarr: f, Sonarr: f, Tautulli: f, Owner: owner}, f
 }
 
 func TestRunMatchesEverything(t *testing.T) {
@@ -230,4 +248,87 @@ func TestRunIsExclusive(t *testing.T) {
 		t.Fatal("second concurrent run should be refused")
 	}
 	s.mu.Unlock()
+}
+
+func TestPlexHistory(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	f.secs = []plex.Section{{Key: "1", Type: "movie", Title: "Movies"}, {Key: "2", Type: "show", Title: "TV"}}
+	f.items = map[string][]plex.Item{"1": {{RatingKey: "10", Type: "movie", Title: "Film"}}, "2": {{RatingKey: "20", Type: "show", Title: "Show"}}}
+	f.views = []plex.View{
+		{HistoryKey: "/status/sessions/history/1", RatingKey: "10", Type: "movie", ViewedAt: 100, AccountID: 1},
+		{HistoryKey: "/status/sessions/history/2", RatingKey: "21", GrandparentKey: "/library/metadata/20", Type: "episode", ParentIndex: 1, Index: 2, ViewedAt: 200, AccountID: 77},
+		{HistoryKey: "/status/sessions/history/3", Type: "episode", ViewedAt: 300, AccountID: 77}, // removed since
+		{HistoryKey: "/status/sessions/history/4", RatingKey: "30", Type: "track", ViewedAt: 400, AccountID: 77},
+	}
+	f.plays = []tautulli.Play{{ReferenceID: 9, RatingKey: 10, MediaType: "movie", Stopped: 50, UserID: 500}}
+	s.Run(ctx)
+	var n, owner int
+	if err := s.DB.QueryRow(`SELECT count(*), sum(plex_user_id = 500) FROM plays WHERE reference_id < 0`).Scan(&n, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || owner != 1 {
+		t.Fatalf("plex rows %d, owner rows %d", n, owner)
+	}
+	var season, episode int
+	var show, name string
+	if err := s.DB.QueryRow(`SELECT season, episode, show_rating_key, user_name FROM plays WHERE reference_id = -2`).Scan(&season, &episode, &show, &name); err != nil {
+		t.Fatal(err)
+	}
+	if season != 1 || episode != 2 || show != "20" || name != "kid" {
+		t.Fatal(season, episode, show, name)
+	}
+	items, err := s.DB.LibraryItems(ctx, storage.User{IsAdmin: true}, "1", storage.LibraryFilter{})
+	if err != nil || len(items) != 1 || items[0].LastWatched != 100 {
+		t.Fatalf("%+v %v", items, err)
+	}
+	// Tautulli's full history doesn't touch Plex's rows, and the reverse.
+	if err := s.DB.ReplacePlays(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT count(*) FROM plays`).Scan(&n); err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+	if last, err := s.DB.LastPlayStopped(ctx); err != nil || !last.IsZero() {
+		t.Fatal("plex rows moved tautulli's sync point", last, err)
+	}
+}
+
+func TestPlexHistoryFailureKeepsOldRows(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	f.views = []plex.View{{HistoryKey: "/status/sessions/history/1", RatingKey: "10", Type: "movie", ViewedAt: 100, AccountID: 77}}
+	s.Run(ctx)
+	f.failViews = true
+	s.Run(ctx)
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM plays WHERE reference_id < 0`).Scan(&n); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+}
+
+// A wrong Plex match must not make an item Radarr or Sonarr manages look
+// Plex-only: it would be deleted through Plex and could download again.
+func TestWrongPlexMatchStillFindsArrByPath(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	movie := plex.Item{RatingKey: "10", Type: "movie", Title: "Wrong Film", Guids: nil}
+	if err := json.Unmarshal([]byte(`{"ratingKey":"10","type":"movie","title":"Wrong Film","Guid":[{"id":"tmdb://999"}],"Media":[{"Part":[{"file":"/m/Right (2000)/Right.mkv"}]}]}`), &movie); err != nil {
+		t.Fatal(err)
+	}
+	f.secs = []plex.Section{{Key: "1", Type: "movie", Title: "Movies"}, {Key: "2", Type: "show", Title: "TV"}}
+	f.items = map[string][]plex.Item{"1": {movie}, "2": {{RatingKey: "20", Type: "show", Title: "Wrong Show"}}}
+	f.movies = []arr.Movie{{ID: 7, TmdbID: 100, Path: "/m/Right (2000)", SizeOnDisk: 5}}
+	f.series = []arr.Series{{ID: 8, TvdbID: 200, Path: "/t/Right"}}
+	f.showPaths = map[string]string{"20": "/t/Right"}
+	s.Run(ctx)
+	admin := storage.User{IsAdmin: true}
+	movies, err := s.DB.LibraryItems(ctx, admin, "1", storage.LibraryFilter{})
+	if err != nil || len(movies) != 1 || movies[0].ArrID.Int64 != 7 || movies[0].TmdbID.Int64 != 100 || movies[0].SizeBytes != 5 {
+		t.Fatalf("%+v %v", movies, err)
+	}
+	shows, err := s.DB.LibraryItems(ctx, admin, "2", storage.LibraryFilter{})
+	if err != nil || len(shows) != 1 || shows[0].ArrID.Int64 != 8 || shows[0].TvdbID.Int64 != 200 {
+		t.Fatalf("%+v %v", shows, err)
+	}
 }

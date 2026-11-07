@@ -17,6 +17,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
@@ -54,6 +55,7 @@ type (
 		RefreshSection(context.Context, string) error
 		EmptyTrash(context.Context, string) error
 		DeleteItem(context.Context, string) error
+		Sessions(context.Context) ([]plex.Session, error)
 	}
 	SeerrAPI interface {
 		DeleteMedia(context.Context, int64) error
@@ -83,6 +85,16 @@ type Worker struct {
 
 	notifyAfter time.Time
 	spaceAfter  time.Time
+	auditCalls  bool // the log level, read each tick
+}
+
+// recording makes every service call on ctx land in the audit log under item,
+// at the audit log level.
+func (w *Worker) recording(ctx context.Context, item string) context.Context {
+	if !w.auditCalls {
+		return ctx
+	}
+	return httpjson.WithRecorder(ctx, func(c httpjson.Call) { w.DB.Audit(ctx, "worker", "api call", item, c.String()) })
 }
 
 // Loop ticks until ctx ends.
@@ -105,6 +117,12 @@ func (w *Worker) Loop(ctx context.Context, every time.Duration) {
 // Tick checks disk space and watched episodes, sends what's waiting for
 // Discord and runs everything that's due.
 func (w *Worker) Tick(ctx context.Context) {
+	level, err := w.DB.LogLevel(ctx)
+	if err != nil {
+		log.Printf("deleter: log level: %v", err) // not knowing it means recording everything
+	}
+	w.auditCalls = level != storage.LogNormal
+	ctx = w.recording(ctx, "")
 	if !w.Now().Before(w.spaceAfter) {
 		w.spaceAfter = w.Now().Add(spaceCheck)
 		if err := w.checkSpace(ctx); err != nil {
@@ -112,6 +130,9 @@ func (w *Worker) Tick(ctx context.Context) {
 		}
 		if err := w.checkEphemeral(ctx); err != nil {
 			log.Printf("deleter: ephemeral check: %v", err)
+		}
+		if err := w.DB.PruneAudit(ctx, w.Now()); err != nil {
+			log.Printf("deleter: prune audit log: %v", err)
 		}
 	}
 	window, err := w.DB.DeleteWindow(ctx)
@@ -193,6 +214,7 @@ func (e errBusy) Error() string { return e.reason }
 
 func (w *Worker) run(ctx context.Context, d storage.Deletion) {
 	dry := d.DryRun || w.DryRun
+	ctx = w.recording(ctx, d.Title)
 	var steps []string
 	err := w.execute(ctx, d, dry, &steps)
 	// The outcome is recorded even if shutdown is what stopped the steps.
@@ -216,6 +238,7 @@ func (w *Worker) run(ctx context.Context, d storage.Deletion) {
 		detail = strings.TrimPrefix(detail+"; failed: "+err.Error(), "; ")
 	}
 	log.Printf("deleter: %s: %s (dry run: %v): %s", d.Title, state, dry, detail)
+	w.DB.Audit(ctx, "worker", "deletion "+state, d.Title, d.Kind)
 	if err := w.DB.FinishDeletion(ctx, d.ID, state, detail); err != nil {
 		log.Printf("deleter: finish: %v", err)
 	}
@@ -233,11 +256,18 @@ func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, step
 	if !found {
 		return errors.New("no longer in the library")
 	}
-	sessions, err := w.Tautulli.Activity(ctx)
-	if err != nil {
-		return errBusy{"couldn't check what's playing: " + err.Error()}
+	// Either source answering is enough; both failing means not deleting.
+	plexNow, plexErr := w.Plex.Sessions(ctx)
+	tautulliNow, tautulliErr := w.Tautulli.Activity(ctx)
+	if plexErr != nil && tautulliErr != nil {
+		return errBusy{"couldn't check what's playing: " + tautulliErr.Error()}
 	}
-	for _, s := range sessions {
+	for _, s := range plexNow {
+		if s.RatingKey == d.RatingKey || s.GrandparentRatingKey == d.RatingKey {
+			return errBusy{"being watched"}
+		}
+	}
+	for _, s := range tautulliNow {
 		if strconv.FormatInt(int64(s.RatingKey), 10) == d.RatingKey || strconv.FormatInt(int64(s.GrandparentRatingKey), 10) == d.RatingKey {
 			return errBusy{"being watched"}
 		}
@@ -246,12 +276,15 @@ func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, step
 	do := func(name string, fn func() error) error {
 		if dry {
 			*steps = append(*steps, "would "+name)
+			w.DB.Audit(ctx, "worker", "deletion step (dry run)", d.Title, name)
 			return nil
 		}
 		if err := fn(); err != nil {
+			w.DB.Audit(ctx, "worker", "deletion step failed", d.Title, name+": "+err.Error())
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		*steps = append(*steps, name)
+		w.DB.Audit(ctx, "worker", "deletion step", d.Title, name)
 		return nil
 	}
 

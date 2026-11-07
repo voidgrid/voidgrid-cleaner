@@ -22,6 +22,7 @@ import (
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
 	"github.com/voidgrid/voidgrid-cleaner/internal/config"
 	"github.com/voidgrid/voidgrid-cleaner/internal/deleter"
+	"github.com/voidgrid/voidgrid-cleaner/internal/doctor"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 	"github.com/voidgrid/voidgrid-cleaner/internal/sync"
 	"github.com/voidgrid/voidgrid-cleaner/internal/web"
@@ -72,7 +73,12 @@ func run() error {
 	// Whole-library and whole-history reads can take longer than a page load.
 	slow := &http.Client{Timeout: 5 * time.Minute}
 	sc := &seerr.Client{BaseURL: cfg.SeerrURL, APIKey: cfg.SeerrAPIKey, HTTP: hc}
+	tv := &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc}
 	syncer := &sync.Syncer{
+		Owner: func(ctx context.Context) (int64, error) {
+			a, err := tv.Account(ctx, cfg.PlexToken)
+			return a.ID, err
+		},
 		DB:       db,
 		Seerr:    &seerr.Client{BaseURL: cfg.SeerrURL, APIKey: cfg.SeerrAPIKey, HTTP: slow},
 		Plex:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
@@ -106,7 +112,7 @@ func run() error {
 		DiscordChannel: cfg.DiscordChannel,
 		DB:             db,
 		Seerr:          sc,
-		PlexTV:         &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
+		PlexTV:         tv,
 		PinWait:        3 * time.Second,
 		// Posters fetch with the short timeout: a page waits on them.
 		Posters:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
@@ -130,6 +136,15 @@ func run() error {
 	go worker.Loop(stop, time.Minute)
 	go s.WarmLoop(stop, time.Hour)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
+	checkup := &doctor.Doctor{
+		DB:     db,
+		Radarr: arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
+		Sonarr: arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
+		Plex:   &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
+		Seerr:  sc,
+	}
+	syncer.After = func(ctx context.Context) { checkup.Run(ctx) }
+	s.DoctorNow = func() { go checkup.Run(stop) }
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Printf("voidgrid-cleaner listening on %s", cfg.ListenAddr)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/doctor"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -944,5 +945,77 @@ func TestStatusShowsWhyAndEpisodeActions(t *testing.T) {
 	}
 	if ds, _ := s.DB.ActiveDeletions(ctx, storage.User{IsAdmin: true}); len(ds) != 2 {
 		t.Fatalf("%+v", ds)
+	}
+}
+
+func TestDoctorAndLogPages(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	ctx := context.Background()
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	for _, p := range []string{"/doctor", "/log"} {
+		if resp := get(t, c, app.URL+p); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("non-admin %s: %d", p, resp.StatusCode)
+		}
+	}
+	if resp := postForm(t, c, app.URL+"/doctor/check", url.Values{}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin check: %d", resp.StatusCode)
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedLibrary(t, s)
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.SaveFindings(ctx, doctor.KindWrongMatch, []storage.Finding{{Subject: "1", Title: "Bad Match", Detail: "why", Severity: "problem"}}); err != nil {
+		t.Fatal(err)
+	}
+	b := body(t, get(t, c, app.URL+"/doctor"))
+	if !strings.Contains(b, "wrong plex match") || !strings.Contains(b, "Bad Match") || !strings.Contains(b, "doctor (1)") {
+		t.Fatalf("doctor: %s", b)
+	}
+	fs, _ := s.DB.Findings(ctx, "open")
+	if resp := postForm(t, c, app.URL+"/doctor/"+strconv.FormatInt(fs[0].ID, 10)+"/dismiss", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("dismiss: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/doctor")); strings.Contains(b, "Bad Match") || !strings.Contains(b, "1 dismissed") {
+		t.Fatalf("after dismiss: %s", b)
+	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindWrongMatch, []storage.Finding{{Subject: "1", Title: "Bad Match", Severity: "problem"}}); err != nil {
+		t.Fatal(err)
+	}
+	if fs, _ := s.DB.Findings(ctx, "open"); len(fs) != 0 {
+		t.Fatalf("a dismissed finding came back: %+v", fs)
+	}
+
+	if resp := postForm(t, c, app.URL+"/library/item/10/keep", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("keep: %d", resp.StatusCode)
+	}
+	b = body(t, get(t, c, app.URL+"/log"))
+	if !strings.Contains(b, "set status") || !strings.Contains(b, "Bobs Movie") {
+		t.Fatalf("log: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/log?q=nothing-here")); strings.Contains(b, "Bobs Movie") {
+		t.Fatalf("search: %s", b)
+	}
+}
+
+func TestManagedPathsSurviveABadSave(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.SaveLibraryPaths(ctx, []storage.LibraryPath{{Path: "/m", UsedBy: "plex", Media: true}, {Path: "/music", UsedBy: "plex"}}); err != nil {
+		t.Fatal(err)
+	}
+	if resp := postForm(t, c, app.URL+"/settings", url.Values{"managed": {"/m", "/music"}}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save: %d", resp.StatusCode)
+	}
+	ps, _ := s.DB.LibraryPaths(ctx)
+	if !ps[0].Managed || ps[1].Managed {
+		t.Fatalf("music must never be managed: %+v", ps)
+	}
+	b := body(t, postForm(t, c, app.URL+"/settings", url.Values{"log_expiry": {"0"}}))
+	if !strings.Contains(b, "1 to 3650") || !strings.Contains(b, `value="/m"`) {
+		t.Fatalf("error page lost the paths: %s", b)
 	}
 }

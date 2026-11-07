@@ -111,3 +111,25 @@ func TestBadTokenIsAnError(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func TestViewHistoryPages(t *testing.T) {
+	var starts []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status/sessions/history/all", func(w http.ResponseWriter, r *http.Request) {
+		start := r.URL.Query().Get("X-Plex-Container-Start")
+		starts = append(starts, start)
+		if start != "0" {
+			_, _ = w.Write([]byte(`{"MediaContainer":{"Metadata":[{"historyKey":"/h/2","accountID":1}]}}`))
+			return
+		}
+		rows := bytes.Repeat([]byte(`{"historyKey":"/h/1","ratingKey":"5","type":"movie","viewedAt":9,"accountID":7},`), viewPage)
+		_, _ = w.Write(append(append([]byte(`{"MediaContainer":{"Metadata":[`), rows[:len(rows)-1]...), []byte(`]}}`)...))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s := &Server{BaseURL: srv.URL, Token: "t", HTTP: srv.Client()}
+	got, err := s.ViewHistory(context.Background())
+	if err != nil || len(got) != viewPage+1 || len(starts) != 2 || got[0].AccountID != 7 {
+		t.Fatalf("%d rows, starts %v, %v", len(got), starts, err)
+	}
+}

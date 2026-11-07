@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>doctor</h1>
+<div data-live>
+{{with .Doctor}}
+<form class="inline-form" method="post" action="/doctor/check"><button type="submit">check now</button></form>
+<p class="muted">runs after each sync. {{if .Dismissed}}<a href="/doctor">show open</a>{{else}}{{if .DismissedCount}}<a href="/doctor?dismissed=1">show {{.DismissedCount}} dismissed</a>{{end}}{{end}}</p>
+{{range .Groups}}
+<h2>{{.Label}} <span class="muted">({{len .Findings}})</span></h2>
+<table>
+    <thead><tr><th>item</th><th>what's wrong</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+    <tbody>
+    {{range .Findings}}
+    <tr>
+        <td>{{.Title}}{{if eq .Severity "problem"}} <span class="badge">problem</span>{{end}}</td>
+        <td class="muted">{{.Detail}}</td>
+        <td>{{if $.Doctor.Dismissed}}<form class="inline-form" method="post" action="/doctor/{{.ID}}/open"><button type="submit" aria-label="reopen {{.Title}}">reopen</button></form>{{else}}<form class="inline-form" method="post" action="/doctor/{{.ID}}/dismiss"><button type="submit" aria-label="dismiss {{.Title}}">dismiss</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="muted">{{if .Dismissed}}nothing dismissed.{{else}}nothing to report.{{end}}</p>
+{{end}}
+{{end}}
+</div>
+{{end}}

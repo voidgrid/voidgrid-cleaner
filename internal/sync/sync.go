@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"path"
 	"strconv"
 	"sync"
 	"time"
@@ -30,6 +31,9 @@ type (
 	PlexAPI interface {
 		Sections(context.Context) ([]plex.Section, error)
 		Items(context.Context, string) ([]plex.Item, error)
+		ShowPath(context.Context, string) (string, error)
+		ViewHistory(context.Context) ([]plex.View, error)
+		Accounts(context.Context) ([]plex.ServerAccount, error)
 	}
 	RadarrAPI interface {
 		Movies(context.Context) ([]arr.Movie, error)
@@ -49,6 +53,7 @@ const (
 	SrcRequests    = "seerr requests"
 	SrcHistory     = "tautulli history"
 	SrcHistoryFull = "tautulli history (full)"
+	SrcPlexHistory = "plex history"
 )
 
 // fullHistoryEvery is how often history is re-read whole instead of from
@@ -63,6 +68,11 @@ type Syncer struct {
 	Radarr   RadarrAPI
 	Sonarr   SonarrAPI
 	Tautulli TautulliAPI
+	// Owner returns the server owner's plex.tv ID: Plex's history calls them
+	// account 1, and everything else here uses the plex.tv ID.
+	Owner func(context.Context) (int64, error)
+	// After runs when a sync finishes, if set.
+	After func(context.Context)
 
 	mu sync.Mutex
 }
@@ -101,6 +111,7 @@ func (s *Syncer) Run(ctx context.Context) bool {
 		{SrcLibrary, s.library},
 		{SrcRequests, s.requests},
 		{histName, histFn},
+		{SrcPlexHistory, s.plexHistory},
 	} {
 		n, err := step.fn(ctx)
 		if err != nil {
@@ -109,6 +120,9 @@ func (s *Syncer) Run(ctx context.Context) bool {
 		if rerr := s.DB.RecordSync(ctx, step.name, n, err); rerr != nil {
 			log.Printf("sync: record %s: %v", step.name, rerr)
 		}
+	}
+	if s.After != nil {
+		s.After(ctx)
 	}
 	return true
 }
@@ -143,13 +157,15 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	byTmdb := map[int64]arr.Movie{}
+	byTmdb, moviePaths := map[int64]arr.Movie{}, map[string]arr.Movie{}
 	for _, m := range movies {
 		byTmdb[m.TmdbID] = m
+		moviePaths[m.Path] = m
 	}
-	byTvdb := map[int64]arr.Series{}
+	byTvdb, seriesPaths := map[int64]arr.Series{}, map[string]arr.Series{}
 	for _, sr := range series {
 		byTvdb[sr.TvdbID] = sr
+		seriesPaths[sr.Path] = sr
 	}
 
 	stored, err := s.DB.Sections(ctx)
@@ -181,13 +197,35 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 				Year: it.Year, Thumb: it.Thumb, AddedAt: it.AddedAt,
 				TmdbID: idOf(it, "tmdb"), TvdbID: idOf(it, "tvdb"),
 			}
-			if sec.Type == "movie" && m.TmdbID.Valid {
-				if rm, ok := byTmdb[m.TmdbID.Int64]; ok {
+			if sec.Type == "movie" {
+				rm, ok := byTmdb[m.TmdbID.Int64]
+				if !ok || !m.TmdbID.Valid {
+					// Plex's ID can be wrong, but the file can't. Taking Radarr's
+					// ID also keeps the deletion's own lookup on Radarr's path:
+					// an item Radarr manages must never be deleted through Plex.
+					for _, f := range it.Files() {
+						if byFile, found := moviePaths[path.Dir(f)]; found {
+							rm, ok = byFile, true
+							m.TmdbID = sql.NullInt64{Int64: rm.TmdbID, Valid: true}
+						}
+					}
+				}
+				if ok {
 					m.ArrID, m.SizeBytes = sql.NullInt64{Int64: rm.ID, Valid: true}, rm.SizeOnDisk
 				}
 			}
-			if sec.Type == "show" && m.TvdbID.Valid {
-				if ss, ok := byTvdb[m.TvdbID.Int64]; ok {
+			if sec.Type == "show" {
+				ss, ok := byTvdb[m.TvdbID.Int64]
+				if !ok || !m.TvdbID.Valid {
+					dir, err := s.Plex.ShowPath(ctx, it.RatingKey)
+					if err != nil {
+						return 0, err
+					}
+					if ss, ok = seriesPaths[dir]; ok {
+						m.TvdbID = sql.NullInt64{Int64: ss.TvdbID, Valid: true}
+					}
+				}
+				if ok {
 					m.ArrID, m.SizeBytes = sql.NullInt64{Int64: ss.ID, Valid: true}, ss.Statistics.SizeOnDisk
 				}
 			}
@@ -281,6 +319,51 @@ func (s *Syncer) fullHistory(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return len(out), s.DB.ReplacePlays(ctx, out)
+}
+
+// plexHistory copies Plex's own views, which go back further than Tautulli's
+// and carry on if Tautulli is down.
+func (s *Syncer) plexHistory(ctx context.Context) (int, error) {
+	views, err := s.Plex.ViewHistory(ctx)
+	if err != nil {
+		return 0, err
+	}
+	accounts, err := s.Plex.Accounts(ctx)
+	if err != nil {
+		return 0, err
+	}
+	owner, err := s.Owner(ctx)
+	if err != nil {
+		return 0, err
+	}
+	names := map[int64]string{}
+	for _, a := range accounts {
+		names[a.ID] = a.Name
+	}
+	out := make([]storage.Play, 0, len(views))
+	for _, v := range views {
+		id, err := strconv.ParseInt(path.Base(v.HistoryKey), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("history key %q: %w", v.HistoryKey, err)
+		}
+		show := v.RatingKey
+		if v.Type == "episode" {
+			show = path.Base(v.GrandparentKey)
+		}
+		// shortcut: views of removed or re-added items have no keys, so they're skipped; matching by title risks the wrong item, so only if that history matters.
+		if (v.Type != "movie" && v.Type != "episode") || v.RatingKey == "" || show == "" || show == "." {
+			continue
+		}
+		user := v.AccountID
+		if user == 1 {
+			user = owner
+		}
+		out = append(out, storage.Play{
+			ReferenceID: -id, PlexUserID: user, UserName: names[v.AccountID], MediaType: v.Type, RatingKey: v.RatingKey, ShowRatingKey: show,
+			Season: v.ParentIndex, Episode: v.Index, Percent: 100, Watched: true, Stopped: v.ViewedAt,
+		})
+	}
+	return len(out), s.DB.ReplacePlexViews(ctx, out)
 }
 
 func (s *Syncer) readHistory(ctx context.Context, after time.Time) ([]storage.Play, error) {

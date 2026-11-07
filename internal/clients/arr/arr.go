@@ -56,6 +56,76 @@ type QueueItem struct {
 	EpisodeID int64  `json:"episodeId"` // Sonarr only
 }
 
+// RootFolder is a library folder, with the folders in it that nothing tracks.
+type RootFolder struct {
+	Path            string `json:"path"`
+	Accessible      bool   `json:"accessible"`
+	UnmappedFolders []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	} `json:"unmappedFolders"`
+}
+
+// RootFolders lists the library folders.
+func (c *Client) RootFolders(ctx context.Context) ([]RootFolder, error) {
+	var out []RootFolder
+	err := c.call(ctx, http.MethodGet, "/api/v3/rootfolder", nil, &out)
+	return out, err
+}
+
+// Health is one entry on the System > Status page.
+type Health struct {
+	Source  string `json:"source"`
+	Type    string `json:"type"` // "ok", "notice", "warning" or "error"
+	Message string `json:"message"`
+}
+
+// Health lists what the app itself reports as wrong.
+func (c *Client) Health(ctx context.Context) ([]Health, error) {
+	var out []Health
+	err := c.call(ctx, http.MethodGet, "/api/v3/health", nil, &out)
+	return out, err
+}
+
+// total reads a paged endpoint's record count.
+func (c *Client) total(ctx context.Context, path string) (int, error) {
+	var out struct {
+		TotalRecords int `json:"totalRecords"`
+	}
+	err := c.call(ctx, http.MethodGet, path, nil, &out)
+	return out.TotalRecords, err
+}
+
+// BlocklistSize counts blocked releases.
+func (c *Client) BlocklistSize(ctx context.Context) (int, error) {
+	return c.total(ctx, "/api/v3/blocklist?pageSize=1")
+}
+
+// MissingCount counts monitored, released items with no file.
+func (c *Client) MissingCount(ctx context.Context) (int, error) {
+	return c.total(ctx, "/api/v3/wanted/missing?pageSize=1&monitored=true")
+}
+
+// MediaManagement is the part of those settings the doctor checks.
+type MediaManagement struct {
+	RecycleBin              string `json:"recycleBin"`
+	DeleteEmptyFolders      bool   `json:"deleteEmptyFolders"`
+	CreateEmptyMovieFolders bool   `json:"createEmptyMovieFolders"`
+}
+
+// MediaManagement reads those settings.
+func (c *Client) MediaManagement(ctx context.Context) (MediaManagement, error) {
+	var out MediaManagement
+	err := c.call(ctx, http.MethodGet, "/api/v3/config/mediamanagement", nil, &out)
+	return out, err
+}
+
+// Rename is a file that doesn't match the naming format.
+type Rename struct {
+	ExistingPath string `json:"existingPath"`
+	NewPath      string `json:"newPath"`
+}
+
 // DiskSpace lists free and total space per disk.
 func (c *Client) DiskSpace(ctx context.Context) ([]DiskSpace, error) {
 	var d []DiskSpace
@@ -73,16 +143,39 @@ func (c *Client) RemoveFromQueue(ctx context.Context, queueID int64) error {
 
 // Movie is a Radarr movie.
 type Movie struct {
-	ID             int64     `json:"id"`
-	Title          string    `json:"title"`
-	Year           int       `json:"year"`
-	TmdbID         int64     `json:"tmdbId"`
-	Monitored      bool      `json:"monitored"`
-	HasFile        bool      `json:"hasFile"`
-	SizeOnDisk     int64     `json:"sizeOnDisk"`
-	Path           string    `json:"path"`
-	RootFolderPath string    `json:"rootFolderPath"`
-	Added          time.Time `json:"added"`
+	ID              int64      `json:"id"`
+	Title           string     `json:"title"`
+	Year            int        `json:"year"`
+	TmdbID          int64      `json:"tmdbId"`
+	Monitored       bool       `json:"monitored"`
+	HasFile         bool       `json:"hasFile"`
+	SizeOnDisk      int64      `json:"sizeOnDisk"`
+	Path            string     `json:"path"`
+	RootFolderPath  string     `json:"rootFolderPath"`
+	Added           time.Time  `json:"added"`
+	OriginalTitle   string     `json:"originalTitle"`
+	ImdbID          string     `json:"imdbId"`
+	IsAvailable     bool       `json:"isAvailable"`
+	AlternateTitles []AltTitle `json:"alternateTitles"`
+	MovieFile       *struct {
+		RelativePath string `json:"relativePath"`
+	} `json:"movieFile"`
+}
+
+// AltTitle is another name for a movie or series.
+type AltTitle struct {
+	Title string `json:"title"`
+}
+
+// RenamePreview lists what Radarr would rename among these movies.
+func (r *Radarr) RenamePreview(ctx context.Context, movieIDs []int64) ([]Rename, error) {
+	q := url.Values{}
+	for _, m := range movieIDs {
+		q.Add("movieId", id(m))
+	}
+	var out []Rename
+	err := r.call(ctx, http.MethodGet, "/api/v3/rename?"+q.Encode(), nil, &out)
+	return out, err
 }
 
 // Movies lists every movie.
@@ -113,17 +206,40 @@ func (r *Radarr) DeleteMovie(ctx context.Context, movieID int64) error {
 
 // Series is a Sonarr series.
 type Series struct {
-	ID             int64     `json:"id"`
-	Title          string    `json:"title"`
-	TvdbID         int64     `json:"tvdbId"`
-	TmdbID         int64     `json:"tmdbId"`
-	Monitored      bool      `json:"monitored"`
-	Path           string    `json:"path"`
-	RootFolderPath string    `json:"rootFolderPath"`
-	Added          time.Time `json:"added"`
-	Statistics     struct {
-		SizeOnDisk int64 `json:"sizeOnDisk"`
+	ID              int64      `json:"id"`
+	Title           string     `json:"title"`
+	TvdbID          int64      `json:"tvdbId"`
+	TmdbID          int64      `json:"tmdbId"`
+	Monitored       bool       `json:"monitored"`
+	Path            string     `json:"path"`
+	RootFolderPath  string     `json:"rootFolderPath"`
+	Added           time.Time  `json:"added"`
+	Year            int        `json:"year"`
+	ImdbID          string     `json:"imdbId"`
+	AlternateTitles []AltTitle `json:"alternateTitles"`
+	Statistics      struct {
+		SizeOnDisk       int64 `json:"sizeOnDisk"`
+		EpisodeFileCount int   `json:"episodeFileCount"`
 	} `json:"statistics"`
+}
+
+// EpisodeFile is a file Sonarr tracks.
+type EpisodeFile struct {
+	Path string `json:"path"`
+}
+
+// EpisodeFiles lists a series' tracked files.
+func (s *Sonarr) EpisodeFiles(ctx context.Context, seriesID int64) ([]EpisodeFile, error) {
+	var out []EpisodeFile
+	err := s.call(ctx, http.MethodGet, "/api/v3/episodefile?seriesId="+id(seriesID), nil, &out)
+	return out, err
+}
+
+// RenamePreview lists what Sonarr would rename in a series.
+func (s *Sonarr) RenamePreview(ctx context.Context, seriesID int64) ([]Rename, error) {
+	var out []Rename
+	err := s.call(ctx, http.MethodGet, "/api/v3/rename?seriesId="+id(seriesID), nil, &out)
+	return out, err
 }
 
 // Episode is a Sonarr episode.

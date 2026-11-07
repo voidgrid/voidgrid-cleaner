@@ -96,6 +96,35 @@ usual notice and delay. A deletion that's cancelled or fails isn't tried again
 until the item is marked space-based again. Items Radarr and Sonarr don't
 manage are never picked, because nothing says which disk they're on.
 
+### Doctor
+
+The **doctor** page lists where Plex, Radarr, Sonarr, Seerr and the disk disagree: wrong or questionable Plex matches, release
+names as titles, untracked folders, stale requests, files off the naming scheme, and more. It runs after each sync. A service
+that can't be reached only skips the checks that need it, and their last results stay. Dismiss anything you've decided is
+fine, and it stays dismissed.
+
+It needs to see your media to check the disk. Mount it at the same path Radarr, Sonarr and Plex use, so a path means the same
+thing everywhere. On the **settings** page, every path in use is listed with whether this app can see it. A path counts as
+verified only when a file the other services list really exists there, and the doctor looks only inside paths you've ticked
+as managed and that are verified. A path a service uses and this app can't see is reported, and you can dismiss it if it
+isn't needed.
+
+### Log
+
+The **log** page shows who decided what: status changes, deletions and each of their steps, Keep and Add me presses, and
+settings changes. At the **audit** log level, the default, it also records every call the app makes to another service while
+acting: method, path and result, never keys or tokens. **Normal** leaves those out. Entries older than the **log expiry** on the
+settings page (default 90 days) are removed.
+
+### Watch history
+
+A watch counts if either Plex or Tautulli has it. Plex's history goes back further; Tautulli adds partial plays. If Tautulli
+is down, plays keep arriving from Plex, and a deletion only needs one of the two to confirm nobody is watching. Plays of
+items since removed from Plex can't be tied to anything in the library.
+
+Plex reattaches old history when something is added again. Here a re-add starts clean: plays from before an item's added date
+don't count. Plex's own watched marks aren't changed.
+
 ### Ephemeral shows
 
 Each episode of an ephemeral show is deleted once everyone on the show has

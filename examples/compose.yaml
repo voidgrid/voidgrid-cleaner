@@ -25,3 +25,4 @@ services:
       # VGC_DELETE_LIVE: "true"
     volumes:
       - ./data:/data  # must be writable by uid 1000
+      - /srv/media:/srv/media  # same path Radarr, Sonarr and Plex use, for the doctor's disk checks

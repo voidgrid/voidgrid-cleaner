@@ -86,6 +86,7 @@ func (w *Worker) checkSpace(ctx context.Context) error {
 		if scheduled {
 			over[i] -= it.SizeBytes
 			log.Printf("deleter: %s scheduled: %s is over %d%% used", it.Title, d.Path, limit)
+			w.DB.Audit(ctx, "worker", "schedule deletion", it.RatingKey, fmt.Sprintf("space: %s over %d%%", d.Path, limit))
 		}
 	}
 	return nil

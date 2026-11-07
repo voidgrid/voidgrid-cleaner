@@ -13,6 +13,37 @@
     <h2>admin notices</h2>
     <p class="muted">who gets tagged on discord when someone unlinked presses add me. a discord user ID. default: the server owner.</p>
     <label>discord user <input type="text" name="admin_discord" inputmode="numeric" value="{{.AdminDiscord}}"></label>
+    <h2>log level</h2>
+    <p class="muted">normal records who decided what, and each step of a deletion. audit also records every call the app makes to another service while acting: method, path and result. default: {{.DefaultLevel}}.</p>
+    <label>level
+        <select name="log_level">
+            <option value="audit"{{if eq .LogLevel "audit"}} selected{{end}}>audit</option>
+            <option value="normal"{{if eq .LogLevel "normal"}} selected{{end}}>normal</option>
+        </select>
+    </label>
+    <h2>log expiry</h2>
+    <p class="muted">entries in the log older than this are removed. default: {{.DefaultExpiry}} days; leave empty to use it.</p>
+    <label>keep for (days) <input type="number" name="log_expiry" min="1" max="3650" value="{{.LogExpiry}}"></label>
+    <h2>library paths</h2>
+    <p class="muted">every path plex, radarr and sonarr use, checked on each doctor run. verified means a file they list really is here. the doctor only looks inside, and only ever changes, paths you tick that are verified. music and photos can't be ticked.</p>
+    {{if .Paths}}
+    <table>
+        <thead><tr><th>path</th><th>used by</th><th>can see</th><th>can write</th><th>verified</th><th>managed</th></tr></thead>
+        <tbody>
+        {{range .Paths}}
+        <tr>
+            <td>{{.Path}}</td><td>{{.UsedBy}}</td>
+            <td>{{if .Visible}}yes{{else}}<span class="badge">no</span>{{end}}</td>
+            <td>{{if .Writable}}yes{{else}}no{{end}}</td>
+            <td>{{if .Verified}}yes{{else}}no{{end}}</td>
+            <td>{{if .Media}}<input type="checkbox" name="managed" value="{{.Path}}" aria-label="manage {{.Path}}"{{if .Managed}} checked{{end}}>{{else}}<span class="muted">n/a</span>{{end}}</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="muted">none yet; they appear after the first doctor run.</p>
+    {{end}}
     <button type="submit">save</button>
 </form>
 {{end}}

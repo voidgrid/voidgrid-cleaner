@@ -495,3 +495,86 @@ func TestDeleteWindowTimes(t *testing.T) {
 		t.Fatal(w, err)
 	}
 }
+
+func TestPruneAuditLeavesDeletions(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "M", Type: "movie"}}, []Media{{RatingKey: "1", SectionKey: "1", Type: "movie", Title: "Old"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ScheduleDeletion(ctx, "1", 1, true, KindManual); err != nil {
+		t.Fatal(err)
+	}
+	db.Audit(ctx, "me", "old", "1", "")
+	db.Audit(ctx, "me", "new", "1", "")
+	if _, err := db.Exec(`UPDATE audit_log SET at = ? WHERE action = 'old'`, time.Now().AddDate(0, 0, -91).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PruneAudit(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	es, err := db.AuditLog(ctx, "", 10, 0)
+	if err != nil || len(es) != 1 || es[0].Action != "new" || es[0].Item != "Old" {
+		t.Fatalf("%+v %v", es, err)
+	}
+	if ds, _ := db.ActiveDeletions(ctx, User{IsAdmin: true}); len(ds) != 1 {
+		t.Fatal("pruning touched deletions")
+	}
+}
+
+func TestParseLogExpiry(t *testing.T) {
+	for s, want := range map[string]int{"": DefaultLogExpiry, "1": 1, "3650": 3650} {
+		if n, err := ParseLogExpiry(s); err != nil || n != want {
+			t.Fatal(s, n, err)
+		}
+	}
+	for _, s := range []string{"0", "3651", "x"} {
+		if _, err := ParseLogExpiry(s); err == nil {
+			t.Fatal(s)
+		}
+	}
+}
+
+// Plex reattaches old history to something added again; a re-add starts clean.
+func TestPlaysBeforeARedAddDontCount(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "2", Title: "TV", Type: "show"}}, []Media{
+		{RatingKey: "1", SectionKey: "2", Type: "show", Title: "Readded", AddedAt: 1000, ArrID: sql.NullInt64{Int64: 1, Valid: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertUser(ctx, User{SeerrID: 2, Name: "x", PlexID: sql.NullInt64{Int64: 5, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	rk := sql.NullString{String: "1", Valid: true}
+	if err := db.ReplaceRequests(ctx, []Request{{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: rk}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "1", StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	old := Play{ReferenceID: -1, PlexUserID: 5, MediaType: "episode", RatingKey: "11", ShowRatingKey: "1", Season: 1, Episode: 1, Watched: true, Stopped: 500}
+	if err := db.ReplacePlexViews(ctx, []Play{old}); err != nil {
+		t.Fatal(err)
+	}
+	admin := User{IsAdmin: true}
+	items, err := db.LibraryItems(ctx, admin, "2", LibraryFilter{})
+	if err != nil || items[0].LastWatched != 0 {
+		t.Fatalf("%+v %v", items, err)
+	}
+	if got, _ := db.LibraryItems(ctx, admin, "2", LibraryFilter{RequesterWatched: true}); len(got) != 0 {
+		t.Fatalf("old play counted as requester watched: %+v", got)
+	}
+	if eps, err := db.WatchedEpisodes(ctx, false); err != nil || len(eps) != 0 {
+		t.Fatalf("an old play would delete an episode: %+v %v", eps, err)
+	}
+	fresh := old
+	fresh.ReferenceID, fresh.Stopped = -2, 2000
+	if err := db.ReplacePlexViews(ctx, []Play{old, fresh}); err != nil {
+		t.Fatal(err)
+	}
+	if eps, err := db.WatchedEpisodes(ctx, false); err != nil || len(eps) != 1 {
+		t.Fatalf("%+v %v", eps, err)
+	}
+}

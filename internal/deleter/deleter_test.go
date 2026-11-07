@@ -13,6 +13,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
@@ -31,6 +32,8 @@ type fake struct {
 	disks     []arr.DiskSpace
 	episodes  []arr.Episode
 	posts     []string
+	plexNow   []plex.Session
+	plexErr   error
 }
 
 func (f *fake) rec(format string, a ...any) error {
@@ -99,6 +102,8 @@ func (f *fake) RefreshSection(_ context.Context, s string) error { return f.rec(
 func (f *fake) EmptyTrash(_ context.Context, s string) error { return f.rec("plex trash %s", s) }
 
 func (f *fake) DeleteItem(_ context.Context, k string) error { return f.rec("plex delete %s", k) }
+
+func (f *fake) Sessions(context.Context) ([]plex.Session, error) { return f.plexNow, f.plexErr }
 
 func (f *fake) DeleteMedia(_ context.Context, id int64) error {
 	if err := f.rec("seerr delete %d", id); err != nil {
@@ -368,7 +373,7 @@ func TestBeingWatchedPushesBack(t *testing.T) {
 
 func TestActivityDownPushesBack(t *testing.T) {
 	w, f, now := setup(t)
-	f.activity = errors.New("down")
+	f.activity, f.plexErr = errors.New("down"), errors.New("down")
 	schedule(t, w, "10", false)
 	runDue(w, now)
 	wantCalls(t, f, "notify")
@@ -572,5 +577,65 @@ func TestWindowChangedAfterNotify(t *testing.T) {
 	w.Tick(ctx)
 	if d := recent(t, w); d.State != storage.DeletionDone {
 		t.Fatalf("%+v", d)
+	}
+}
+
+func TestPlayingCheckUsesEitherSource(t *testing.T) {
+	t.Run("tautulli down, plex answers", func(t *testing.T) {
+		w, f, now := setup(t)
+		f.activity = errors.New("down")
+		schedule(t, w, "10", false)
+		runDue(w, now)
+		if d := recent(t, w); d.State != storage.DeletionDone {
+			t.Fatalf("%+v", d)
+		}
+	})
+	t.Run("plex down, tautulli answers", func(t *testing.T) {
+		w, f, now := setup(t)
+		f.plexErr = errors.New("down")
+		schedule(t, w, "10", false)
+		runDue(w, now)
+		if d := recent(t, w); d.State != storage.DeletionDone {
+			t.Fatalf("%+v", d)
+		}
+	})
+	t.Run("only plex sees it playing", func(t *testing.T) {
+		w, f, now := setup(t)
+		f.plexNow = []plex.Session{{RatingKey: "10"}}
+		schedule(t, w, "10", false)
+		runDue(w, now)
+		ds, _ := w.DB.ActiveDeletions(context.Background(), storage.User{IsAdmin: true})
+		if len(ds) != 1 || ds[0].Detail != "being watched" {
+			t.Fatalf("%+v", ds)
+		}
+	})
+}
+
+func TestLogLevelControlsCallRecording(t *testing.T) {
+	ctx := context.Background()
+	count := func(w *Worker) int {
+		es, err := w.DB.AuditLog(ctx, "deletion", 100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(es)
+	}
+	w, _, now := setup(t)
+	schedule(t, w, "10", false)
+	runDue(w, now)
+	if count(w) == 0 {
+		t.Fatal("steps aren't logged")
+	}
+	if !w.auditCalls {
+		t.Fatal("audit should be the default level")
+	}
+	w2, _, now2 := setup(t)
+	if err := w2.DB.SetLogLevel(ctx, storage.LogNormal); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, w2, "10", false)
+	runDue(w2, now2)
+	if w2.auditCalls || count(w2) == 0 {
+		t.Fatal(w2.auditCalls, count(w2))
 	}
 }

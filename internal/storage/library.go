@@ -176,10 +176,22 @@ func (db *DB) UpsertPlays(ctx context.Context, ps []Play) error {
 	return db.tx(ctx, func(tx *sql.Tx) error { return insertPlays(ctx, tx, ps) })
 }
 
-// ReplacePlays makes the plays table exactly ps.
+// ReplacePlays makes Tautulli's plays exactly ps.
 func (db *DB) ReplacePlays(ctx context.Context, ps []Play) error {
 	return db.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM plays`); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plays WHERE reference_id > 0`); err != nil {
+			return err
+		}
+		return insertPlays(ctx, tx, ps)
+	})
+}
+
+// ReplacePlexViews makes Plex's views exactly ps. They share the plays table
+// with negative IDs, so a watch counts whichever source has it; a view both
+// have is two rows, which only inflates the play counts on the users page.
+func (db *DB) ReplacePlexViews(ctx context.Context, ps []Play) error {
+	return db.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM plays WHERE reference_id < 0`); err != nil {
 			return err
 		}
 		return insertPlays(ctx, tx, ps)
@@ -219,7 +231,7 @@ func (db *DB) LastSyncOK(ctx context.Context, source string) (time.Time, error) 
 // LastPlayStopped is when the newest stored play ended, or zero if none.
 func (db *DB) LastPlayStopped(ctx context.Context) (time.Time, error) {
 	var n sql.NullInt64
-	err := db.QueryRowContext(ctx, `SELECT max(stopped) FROM plays`).Scan(&n)
+	err := db.QueryRowContext(ctx, `SELECT max(stopped) FROM plays WHERE reference_id > 0`).Scan(&n)
 	if err != nil || !n.Valid {
 		return time.Time{}, err
 	}
@@ -355,8 +367,10 @@ var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 // the server-side ownership rule: non-admins only ever see or act on these.
 const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user_id = ? AND rating_key IS NOT NULL)`
 
-// lastWatched selects an item's newest play, 0 if never.
-const lastWatched = `coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0) AS last_watched`
+// lastWatched selects an item's newest play, 0 if never. Here and wherever
+// plays are read, plays from before the item's added date don't count: Plex
+// reattaches old history when something is added again, and a re-add starts clean.
+const lastWatched = `coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at), 0) AS last_watched`
 
 // byOldestWatched orders by lastWatched.
 const byOldestWatched = `last_watched = 0, last_watched, m.added_at, m.title COLLATE NOCASE`
@@ -426,14 +440,14 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		args = append(args, daysAgo(f.AddedDays))
 	}
 	if f.UnwatchedDays > 0 {
-		q += ` AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped > ?)`
+		q += ` AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at AND p.stopped > ?)`
 		args = append(args, daysAgo(f.UnwatchedDays))
 	}
 	if f.RequesterWatched {
 		q += ` AND EXISTS (SELECT 1 FROM plays p
 			JOIN ` + plexLinks + ` l ON l.plex_user_id = p.plex_user_id
 			JOIN requests r ON r.seerr_user_id = l.seerr_user_id AND r.rating_key = m.rating_key
-			WHERE p.show_rating_key = m.rating_key AND p.watched = 1)`
+			WHERE p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at)`
 	}
 	switch f.Sort {
 	case "newest":

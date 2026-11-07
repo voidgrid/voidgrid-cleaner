@@ -14,8 +14,12 @@ func (w *Worker) checkEphemeral(ctx context.Context) error {
 		return err
 	}
 	for _, e := range eps {
-		if _, err := w.DB.ScheduleEpisode(ctx, e, w.DryRun); err != nil {
+		ok, err := w.DB.ScheduleEpisode(ctx, e, w.DryRun)
+		if err != nil {
 			return fmt.Errorf("schedule %s: %w", e.Title, err)
+		}
+		if ok {
+			w.DB.Audit(ctx, "worker", "schedule deletion", e.Title, fmt.Sprintf("ephemeral: S%02dE%02d", e.Season, e.Episode))
 		}
 	}
 	return nil

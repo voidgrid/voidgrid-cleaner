@@ -22,6 +22,8 @@ type User struct {
 	AutoApprove bool
 	// UnlinkedDiscord counts Discord users waiting for a link; admins only.
 	UnlinkedDiscord int
+	// OpenFindings counts what the doctor has open; admins only.
+	OpenFindings int
 }
 
 // Setting returns the value stored under key, creating it with fallback()
@@ -64,10 +66,11 @@ func (db *DB) SessionUser(ctx context.Context, token string) (User, error) {
 	var u User
 	err := db.QueryRowContext(ctx, `
 		SELECT u.seerr_user_id, u.display_name, u.plex_id, u.is_admin, u.auto_approve,
-			CASE WHEN u.is_admin THEN (SELECT count(*) FROM discord_users WHERE seerr_user_id IS NULL) ELSE 0 END
+			CASE WHEN u.is_admin THEN (SELECT count(*) FROM discord_users WHERE seerr_user_id IS NULL) ELSE 0 END,
+			CASE WHEN u.is_admin THEN (SELECT count(*) FROM findings WHERE state = 'open') ELSE 0 END
 		FROM sessions s JOIN users u USING (seerr_user_id)
 		WHERE s.token_hash = ? AND s.expires_at > ?`, hashToken(token), time.Now().Unix()).
-		Scan(&u.SeerrID, &u.Name, &u.PlexID, &u.IsAdmin, &u.AutoApprove, &u.UnlinkedDiscord)
+		Scan(&u.SeerrID, &u.Name, &u.PlexID, &u.IsAdmin, &u.AutoApprove, &u.UnlinkedDiscord, &u.OpenFindings)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNoSession
 	}
