@@ -143,6 +143,7 @@ func run() error {
 		Plex:    &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
 		Seerr:   sc,
 		FixWait: 3 * time.Second,
+		DryRun:  worker.DryRun,
 	}
 	s.Previews = checkup
 	go checkup.FixLoop(stop, 2*time.Second)

@@ -391,3 +391,10 @@ func (db *DB) HasActiveDeletion(ctx context.Context, ratingKey string) (bool, er
 		ratingKey, ratingKey, DeletionScheduled, DeletionNotified, DeletionExecuting).Scan(&n)
 	return n > 0, err
 }
+
+// ForgetSeerrMedia drops a title's requests once it's gone from Seerr, so the
+// doctor sees that before the next sync.
+func (db *DB) ForgetSeerrMedia(ctx context.Context, mediaID int64) error {
+	_, err := db.ExecContext(ctx, `DELETE FROM requests WHERE seerr_media_id = ?`, mediaID)
+	return err
+}

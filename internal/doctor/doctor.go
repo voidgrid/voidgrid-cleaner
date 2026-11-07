@@ -117,6 +117,7 @@ type (
 	}
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)
+		DeleteMedia(context.Context, int64) error
 	}
 )
 
@@ -129,6 +130,8 @@ type Doctor struct {
 	Seerr  SeerrAPI
 	// FixWait is the gap between checks that Plex took a match.
 	FixWait time.Duration
+	// DryRun makes a stray file fix report instead of deleting.
+	DryRun bool
 
 	mu sync.Mutex
 }

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
@@ -196,9 +197,16 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 	return f.local, nil
 }
 
-type fakeSeerr struct{}
+type fakeSeerr struct {
+	deleted []int64
+	err     error
+}
 
-func (fakeSeerr) Title(context.Context, string, int64) (string, error) { return "Gone Film", nil }
+func (*fakeSeerr) Title(context.Context, string, int64) (string, error) { return "Gone Film", nil }
+func (f *fakeSeerr) DeleteMedia(_ context.Context, id int64) error {
+	f.deleted = append(f.deleted, id)
+	return f.err
+}
 
 func item(t *testing.T, js string) plex.Item {
 	t.Helper()
@@ -214,6 +222,7 @@ type world struct {
 	radarr *fakeRadarr
 	sonarr *fakeSonarr
 	plex   *fakePlex
+	seerr  *fakeSeerr
 	root   string
 }
 
@@ -236,7 +245,7 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(filepath.Join(film, "Film.mkv"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w := &world{root: root}
+	w := &world{root: root, seerr: &fakeSeerr{}}
 	w.radarr = &fakeRadarr{movies: []arr.Movie{{ID: 1, Title: "Film", Year: 2000, TmdbID: 100, Path: film, HasFile: true, QualityProfileID: 4, MovieFile: &struct {
 		RelativePath string `json:"relativePath"`
 	}{"Film.mkv"}}}}
@@ -250,7 +259,7 @@ func newWorld(t *testing.T) *world {
 		}{{Path: root}}}},
 		items: map[string][]plex.Item{"1": {item(t, `{"ratingKey":"10","title":"Film","year":2000,"guid":"plex://movie/1","Guid":[{"id":"tmdb://100"}],"Media":[{"Part":[{"file":"`+filepath.Join(film, "Film.mkv")+`"}]}]}`)}},
 	}
-	w.d = &Doctor{DB: db, Radarr: w.radarr, Sonarr: w.sonarr, Plex: w.plex, Seerr: fakeSeerr{}}
+	w.d = &Doctor{DB: db, Radarr: w.radarr, Sonarr: w.sonarr, Plex: w.plex, Seerr: w.seerr}
 	return w
 }
 
@@ -963,5 +972,221 @@ func TestManualImportUsesPlexResolution(t *testing.T) {
 	p, err := w.d.Preview(context.Background(), w.open(t, KindNotAccepted)[0])
 	if err != nil || !p.HasDefault || p.Choices[0].Value != "WEBDL-720p" {
 		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func (w *world) staleRequest(t *testing.T) storage.Finding {
+	t.Helper()
+	if err := w.d.DB.ReplaceRequests(context.Background(), []storage.Request{{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "movie", TmdbID: 42, Status: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindStaleRequest)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0]
+}
+
+func TestStaleRequestFix(t *testing.T) {
+	w := newWorld(t)
+	f := w.staleRequest(t)
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if fmt.Sprint(w.seerr.deleted) != "[7]" {
+		t.Fatal(w.seerr.deleted)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStaleRequest); len(fs) != 0 {
+		t.Fatalf("should clear without waiting for a sync: %+v", fs)
+	}
+}
+
+func TestStaleRequestAlreadyGoneIsFine(t *testing.T) {
+	w := newWorld(t)
+	f := w.staleRequest(t)
+	w.seerr.err = &httpjson.StatusError{Code: 404}
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestStaleRequestErrorIsReported(t *testing.T) {
+	w := newWorld(t)
+	f := w.staleRequest(t)
+	w.seerr.err = errors.New("seerr down")
+	if j := w.fix(t, f, ""); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+// emptyFolder sets up an untracked folder under a managed path.
+func (w *world) emptyFolder(t *testing.T, files ...string) (storage.Finding, string) {
+	t.Helper()
+	dir := filepath.Join(w.root, "Left (2001)")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.radarr.state.roots[0].UnmappedFolders = []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}{{Name: "Left (2001)", Path: dir}}
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(context.Background(), []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindEmptyFolder)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0], dir
+}
+
+func TestEmptyFolderFix(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyFolder(t)
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+}
+
+func TestPlexmatchOnlyFolderCountsAsEmpty(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyFolder(t, leftoverFile)
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+}
+
+func TestEmptyFolderFixLeavesAFolderThatFilledUp(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyFolder(t)
+	if err := os.WriteFile(filepath.Join(dir, "new.mkv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, ""); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.mkv")); err != nil {
+		t.Fatal("deleted a new file", err)
+	}
+}
+
+func TestEmptyFolderFixLeavesAFolderThatGotTracked(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyFolder(t)
+	w.radarr.state.roots[0].UnmappedFolders = nil
+	if j := w.fix(t, f, ""); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatal("removed a tracked folder", err)
+	}
+}
+
+func TestDiskFixRefusesUnmanagedPath(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	f, dir := w.emptyFolder(t)
+	if err := w.d.DB.SetManagedPaths(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, ""); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatal("touched an unmanaged path", err)
+	}
+}
+
+func TestRootRefusesToEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "keep.mkv")
+	if err := os.WriteFile(outside, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Dir(outside), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeUnder(root, filepath.Join(link, "keep.mkv")); err == nil {
+		t.Fatal("followed a link out of the root")
+	}
+	if err := removeUnder(root, filepath.Join(root, "..", filepath.Base(filepath.Dir(outside)), "keep.mkv")); err == nil {
+		t.Fatal("walked out of the root")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoveUnderWontTakeAFullFolder(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "full")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.mkv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeUnder(root, dir); err == nil {
+		t.Fatal("removed a folder with a file in it")
+	}
+}
+
+func (w *world) strayFile(t *testing.T) (storage.Finding, string) {
+	t.Helper()
+	stray := filepath.Join(w.root, "Film (2000)", "extra.m2ts")
+	if err := os.WriteFile(stray, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(context.Background(), []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindStrayFile)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0], stray
+}
+
+func TestStrayFileFix(t *testing.T) {
+	w := newWorld(t)
+	f, stray := w.strayFile(t)
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.root, "Film (2000)", "Film.mkv")); err != nil {
+		t.Fatal("deleted the tracked file", err)
+	}
+}
+
+func TestStrayFileDryRunDeletesNothing(t *testing.T) {
+	w := newWorld(t)
+	w.d.DryRun = true
+	f, stray := w.strayFile(t)
+	if j := w.fix(t, f, ""); j.State != "done" || !strings.Contains(j.Detail, "dry run") {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatal("a dry run deleted a file", err)
 	}
 }

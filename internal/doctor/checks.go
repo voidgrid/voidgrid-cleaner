@@ -246,7 +246,7 @@ func folderKind(dir string) string {
 	if err != nil {
 		return ""
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 || (len(entries) == 1 && entries[0].Name() == leftoverFile) {
 		return "empty"
 	}
 	return "files"
@@ -290,7 +290,7 @@ func (s *snapshot) emptyFolders() []storage.Finding {
 	var out []storage.Finding
 	for _, u := range s.unmapped() {
 		if s.inManaged(u.path) && folderKind(u.path) == "empty" {
-			out = append(out, storage.Finding{Subject: u.path, Title: path.Base(u.path), Severity: note, Detail: u.path})
+			out = append(out, storage.Finding{Subject: u.path, Title: path.Base(u.path), Severity: note, Detail: u.path, Data: encode(fixData{App: u.app, Folder: u.path, Root: u.root})})
 		}
 	}
 	return out
@@ -314,7 +314,10 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 		// A series folder that can't be read is skipped, like a movie's below.
 		_ = filepath.WalkDir(sr.Path, func(p string, e fs.DirEntry, err error) error {
 			if err == nil && !e.IsDir() && isVideoFile(p) && !tracked[p] {
-				out = append(out, storage.Finding{Subject: p, Title: e.Name(), Severity: check, Detail: "In " + sr.Title + "'s folder, and Sonarr doesn't track it."})
+				out = append(out, storage.Finding{
+					Subject: p, Title: e.Name(), Severity: check, Detail: "In " + sr.Title + "'s folder, and Sonarr doesn't track it.",
+					Data: encode(fixData{App: appSonarr, ArrID: sr.ID, Folder: p}),
+				})
 			}
 			return nil
 		})
@@ -332,7 +335,10 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 				continue
 			}
 			p := path.Join(m.Path, e.Name())
-			out = append(out, storage.Finding{Subject: p, Title: e.Name(), Severity: check, Detail: "In " + m.Title + "'s folder, and Radarr doesn't track it."})
+			out = append(out, storage.Finding{
+				Subject: p, Title: e.Name(), Severity: check, Detail: "In " + m.Title + "'s folder, and Radarr doesn't track it.",
+				Data: encode(fixData{App: appRadarr, ArrID: m.ID, Folder: p}),
+			})
 		}
 	}
 	return out, nil
@@ -471,7 +477,7 @@ func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Find
 		if err != nil || title == "" {
 			title = fmt.Sprintf("%s %d", r.Type, r.TmdbID) // TMDb may have dropped it
 		}
-		out = append(out, storage.Finding{Subject: fmt.Sprint(r.MediaID), Title: title, Severity: note, Detail: "Requested in Seerr, and nothing has it."})
+		out = append(out, storage.Finding{Subject: fmt.Sprint(r.MediaID), Title: title, Severity: note, Detail: "Requested in Seerr, and nothing has it.", Data: encode(fixData{MediaID: r.MediaID})})
 	}
 	return out, nil
 }

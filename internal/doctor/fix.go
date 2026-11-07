@@ -31,6 +31,7 @@ type fixData struct {
 	NewName   string `json:"new_name,omitempty"`
 	Folder    string `json:"folder,omitempty"`
 	Root      string `json:"root,omitempty"`
+	MediaID   int64  `json:"media_id,omitempty"`
 	// Resolution is what Plex measured, as Plex writes it.
 	Resolution string `json:"resolution,omitempty"`
 }
@@ -48,6 +49,7 @@ const localPrefix = "plex:local:"
 // Fixable reports whether the doctor can fix a finding.
 func Fixable(kind, subject string) bool {
 	return NeedsChoice(kind) || kind == KindReleaseTitle || kind == KindNaming ||
+		kind == KindStaleRequest || kind == KindEmptyFolder || kind == KindStrayFile ||
 		(kind == KindSettings && (strings.HasPrefix(subject, localPrefix) || subject == emptyFoldersSubject))
 }
 
@@ -91,6 +93,10 @@ func (d *Doctor) Preview(ctx context.Context, f storage.Finding) (Preview, error
 	}
 	if isArrFix(f) {
 		return p, d.previewArr(ctx, &p, data)
+	}
+	if isDiskFix(f) {
+		d.previewDisk(&p, data)
+		return p, nil
 	}
 	if f.Kind == KindSettings {
 		p.CanFix = true
@@ -178,6 +184,9 @@ func (d *Doctor) apply(ctx context.Context, f storage.Finding, choice string) (s
 	}
 	if isArrFix(f) {
 		return d.applyArr(ctx, f, data, choice)
+	}
+	if isDiskFix(f) {
+		return d.applyDisk(ctx, f, data)
 	}
 	if f.Kind == KindSettings {
 		return d.applyLocalMetadata(ctx, data)
