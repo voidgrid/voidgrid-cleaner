@@ -503,3 +503,46 @@ func TestKeepAfterClaimRefused(t *testing.T) {
 		t.Fatalf("%+v", us)
 	}
 }
+
+func TestDeleteWindow(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	*now = time.Date(2026, 1, 5, 12, 0, 0, 0, time.Local)
+	if err := w.DB.SetDeleteWindow(ctx, storage.DeleteWindow{Start: "03:00", End: "05:00"}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, w, "10", false)
+	w.Tick(ctx)
+	want := time.Date(2026, 1, 7, 3, 0, 0, 0, time.Local) // 24 hours lands at noon, so the next opening after that
+	if ds := active(t, w); len(ds) != 1 || ds[0].DeleteAfter != want.Unix() {
+		t.Fatalf("%+v, want %d", ds, want.Unix())
+	}
+	*now = want.Add(-time.Minute)
+	w.Tick(ctx)
+	wantCalls(t, f, "notify")
+	*now = want
+	w.Tick(ctx)
+	if d := recent(t, w); d.State != storage.DeletionDone {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A window set after the clock started still holds the deletion back.
+func TestWindowChangedAfterNotify(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	*now = time.Date(2026, 1, 5, 12, 0, 0, 0, time.Local)
+	schedule(t, w, "10", false)
+	w.Tick(ctx)
+	if err := w.DB.SetDeleteWindow(ctx, storage.DeleteWindow{Start: "03:00", End: "05:00"}); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(storage.DeletionDelay + time.Minute)
+	w.Tick(ctx)
+	wantCalls(t, f, "notify")
+	*now = time.Date(2026, 1, 7, 3, 1, 0, 0, time.Local)
+	w.Tick(ctx)
+	if d := recent(t, w); d.State != storage.DeletionDone {
+		t.Fatalf("%+v", d)
+	}
+}

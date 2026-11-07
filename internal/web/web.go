@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"log"
@@ -69,6 +70,13 @@ type page struct {
 	Discord   []storage.DiscordUser
 	Users     []storage.User
 	Status    *statusPage
+	Settings  *settingsPage
+}
+
+type settingsPage struct {
+	Window storage.DeleteWindow
+	Zone   string
+	Saved  bool
 }
 
 type statusPage struct {
@@ -87,7 +95,12 @@ type libraryPage struct {
 	Current  storage.Section
 	Items    []storage.LibraryItem
 	Filter   storage.LibraryFilter
+	Total    int
+	More     string // URL of the next items, "" at the end
 }
+
+// libraryPageSize is how many cards a library page starts with: four rows.
+const libraryPageSize = 32
 
 type syncPage struct {
 	Statuses  []storage.SyncStatus
@@ -104,7 +117,7 @@ func init() {
 			if unix == 0 {
 				return "never"
 			}
-			return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC")
+			return time.Unix(unix, 0).Format("2006-01-02 15:04 MST")
 		},
 		"day": func(unix int64) string {
 			if unix == 0 {
@@ -123,7 +136,7 @@ func init() {
 		},
 		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -159,6 +172,7 @@ func (s *Server) Router() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireSession)
 		r.Get("/", s.status)
+		r.Get("/changes", s.changes)
 		r.Get("/library", s.library)
 		r.Get("/library/{key}", s.library)
 		r.Get("/poster/{ratingKey}", s.poster)
@@ -167,6 +181,8 @@ func (s *Server) Router() http.Handler {
 			r.Get("/sync", s.syncStatus)
 			r.Get("/libraries", s.libraries)
 			r.Get("/users", s.users)
+			r.Get("/settings", s.settings)
+			r.Post("/settings", s.saveSettings)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			r.Post("/users/discord/{id}", s.setDiscordUser)
 			// shortcut: admins only until the request flow lets users ask for changes.
@@ -422,6 +438,14 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	f := storage.LibraryFilter{
 		Search: strings.TrimSpace(v.Get("q")), Sort: v.Get("sort"), Status: v.Get("status"),
 		AddedDays: days("added"), UnwatchedDays: days("unwatched"), RequesterWatched: v.Get("requester") == "1",
+		Limit: libraryPageSize,
+	}
+	// The page script asks for everything it has loaded when it refreshes.
+	if n, err := strconv.Atoi(v.Get("limit")); err == nil && n > 0 {
+		f.Limit = min(n, 10000)
+	}
+	if n, err := strconv.Atoi(v.Get("offset")); err == nil && n > 0 {
+		f.Offset = n
 	}
 	items, err := s.DB.LibraryItems(r.Context(), u, key, f)
 	if err != nil {
@@ -429,7 +453,29 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "library", page{User: &u, Library: &libraryPage{Sections: secs, Current: secs[i], Items: items, Filter: f}})
+	lib := &libraryPage{Sections: secs, Current: secs[i], Items: items, Filter: f}
+	if len(items) > 0 {
+		lib.Total = items[0].Total
+	}
+	if next := f.Offset + len(items); next < lib.Total {
+		v.Del("limit")
+		v.Set("offset", strconv.Itoa(next))
+		lib.More = "/library/" + url.PathEscape(key) + "?" + v.Encode()
+	}
+	render(w, http.StatusOK, "library", page{User: &u, Library: lib})
+}
+
+// changes tells open pages whether anything they show has changed.
+func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
+	v, err := s.DB.ChangeVersion(r.Context())
+	if err != nil {
+		log.Printf("web: change version: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, `{"version":%d}`, v)
 }
 
 // setStatus records a status for an item and returns to the same view.
@@ -557,24 +603,118 @@ func (s *Server) poster(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// The thumb path changes when the artwork does, so it names the file.
-	sum := sha256.Sum256([]byte(thumb))
-	name := hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(posterW) + ".jpg"
-	b, err := s.PosterCache.ReadFile(name)
+	b, err := s.cachedPoster(r.Context(), thumb)
 	if err != nil {
-		if b, err = s.Posters.Poster(r.Context(), thumb, posterW, posterH); err != nil {
-			log.Printf("web: poster: %v", err)
-			http.Error(w, "poster unavailable", http.StatusBadGateway)
-			return
-		}
-		// shortcut: the cache never shrinks; ~10 KB a poster, prune by hand if the library churns a lot.
-		if err := writeAtomic(s.PosterCache, name, b); err != nil {
-			log.Printf("web: cache poster: %v", err)
-		}
+		log.Printf("web: poster: %v", err)
+		http.Error(w, "poster unavailable", http.StatusBadGateway)
+		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	_, _ = w.Write(b) //nolint:gosec // G705: Plex image bytes served as image/jpeg with nosniff, never as HTML
+}
+
+// posterName is the thumb's cache file. The thumb path changes when the
+// artwork does, so it names the file.
+func posterName(thumb string) string {
+	sum := sha256.Sum256([]byte(thumb))
+	return hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(posterW) + ".jpg"
+}
+
+// cachedPoster returns a poster from disk, fetching it from Plex the first time.
+func (s *Server) cachedPoster(ctx context.Context, thumb string) ([]byte, error) {
+	name := posterName(thumb)
+	if b, err := s.PosterCache.ReadFile(name); err == nil {
+		return b, nil
+	}
+	b, err := s.Posters.Poster(ctx, thumb, posterW, posterH)
+	if err != nil {
+		return nil, err
+	}
+	// shortcut: the cache never shrinks; ~20 KB a poster, prune by hand if the library churns a lot.
+	if err := writeAtomic(s.PosterCache, name, b); err != nil {
+		log.Printf("web: cache poster: %v", err)
+	}
+	return b, nil
+}
+
+// warmFailures is how many posters in a row may fail before a run gives up:
+// one broken poster shouldn't stop the rest, but Plex being down should.
+const warmFailures = 5
+
+// WarmPosters fetches every poster not cached yet, one at a time so Plex
+// isn't flooded, and returns how many it fetched.
+func (s *Server) WarmPosters(ctx context.Context) int {
+	thumbs, err := s.DB.Thumbs(ctx)
+	if err != nil {
+		log.Printf("web: warm posters: %v", err)
+		return 0
+	}
+	fetched, failed := 0, 0
+	for _, thumb := range thumbs {
+		if ctx.Err() != nil {
+			return fetched
+		}
+		if _, err := s.PosterCache.Stat(posterName(thumb)); err == nil {
+			continue
+		}
+		if _, err := s.cachedPoster(ctx, thumb); err != nil {
+			if failed++; failed >= warmFailures {
+				log.Printf("web: warm posters: stopped after %d failures: %v", failed, err)
+				return fetched
+			}
+			continue
+		}
+		failed = 0
+		fetched++
+	}
+	return fetched
+}
+
+// WarmLoop keeps the poster cache full until ctx ends.
+func (s *Server) WarmLoop(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if n := s.WarmPosters(ctx); n > 0 {
+			log.Printf("web: fetched %d posters", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	win, err := s.DB.DeleteWindow(r.Context())
+	if err != nil {
+		log.Printf("web: delete window: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "settings", page{User: &u, Settings: &settingsPage{
+		Window: win, Zone: time.Now().Format("MST"), Saved: r.URL.Query().Get("saved") == "1",
+	}})
+}
+
+func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	win := storage.DeleteWindow{Start: r.PostFormValue("window_start"), End: r.PostFormValue("window_end")}
+	if err := win.Validate(); err != nil {
+		u := userFrom(r.Context())
+		// A 200: a typo here shouldn't count towards a proxy ban.
+		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{Window: win, Zone: time.Now().Format("MST")}})
+		return
+	}
+	if err := s.DB.SetDeleteWindow(r.Context(), win); err != nil {
+		log.Printf("web: save settings: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
 }
 
 // writeAtomic writes name in root via a temp file and rename, so a reader

@@ -43,6 +43,7 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_DISCORD_PUBLIC_KEY` | for live deletion | | The Discord application's public key |
 | `VGC_DISCORD_CHANNEL` | for live deletion | | Channel ID for notifications |
 | `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
+| `TZ` | no | `UTC` | Time zone for times on screen and the delete window, e.g. `Etc/UTC` |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
 | `VGC_DB_PATH` | no | `/data/voidgrid-cleaner.db` | SQLite database file |
 
@@ -91,7 +92,9 @@ Admins press **delete** on an item. A Discord bot posts it to a channel, and
 the app deletes it 24 hours after Discord confirms the post; if the post fails,
 the clock doesn't start. Until then anyone in the channel can press **Keep**,
 and the **status** screen can keep, postpone or cancel it. Right before deleting, the app checks that nobody is watching and
-asks Radarr and Sonarr whether they manage the item.
+asks Radarr and Sonarr whether they manage the item. On the **settings** page,
+admins can limit deletions to a window, such as 03:00 to 05:00; anything due
+outside it waits for the window to open.
 
 Items Radarr or Sonarr manage are unmonitored and cleared from the queue
 before their files go, so they can't be downloaded again, then removed from
@@ -114,6 +117,13 @@ test it, and every request is checked against the application's public key.
 The only action it accepts is Keep. A Keep works straight away; people who
 press it appear on the **users** page, where admins can link them to a Seerr
 user to show who it was.
+
+### Pages
+
+Library pages start with 32 items and load more as you scroll. Posters are
+fetched in the background, so they're usually on disk before anyone needs them. Open pages check
+for changes every 5 seconds, so a Keep pressed in Discord shows up by itself.
+Everything also works without JavaScript, as plain links and forms.
 
 ### Who can sign in
 

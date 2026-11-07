@@ -1,5 +1,6 @@
 {{define "content"}}
 <h1>status</h1>
+<div data-live>
 {{with .Status}}
 {{if .DryRun}}<p class="muted">dry run: nothing is really deleted.</p>{{end}}
 {{if .Active}}
@@ -39,4 +40,5 @@
 </table>
 {{end}}
 {{end}}
+</div>
 {{end}}

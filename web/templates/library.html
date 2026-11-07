@@ -37,7 +37,7 @@
         </div>
     </details>
 </form>
-<p class="muted">{{len .Items}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Filter.Search}} matching "{{.Filter.Search}}"{{end}}.</p>
+<p class="muted" id="count">{{.Total}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Filter.Search}} matching "{{.Filter.Search}}"{{end}}.</p>
 <ul class="cards">
     {{range .Items}}
     {{$it := .}}
@@ -73,6 +73,7 @@
     </li>
     {{end}}
 </ul>
+{{if .More}}<a class="more" id="more" href="{{.More}}">more</a>{{end}}
 {{end}}
 {{end}}
 {{end}}

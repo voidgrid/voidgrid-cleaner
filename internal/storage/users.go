@@ -201,3 +201,10 @@ func (db *DB) SetDiscordUser(ctx context.Context, discordID string, seerrID int6
 	return changed(db.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = ?
 		WHERE discord_id = ? AND EXISTS (SELECT 1 FROM users WHERE seerr_user_id = ?)`, seerrID, discordID, seerrID))
 }
+
+// ChangeVersion goes up whenever something open pages show has changed.
+func (db *DB) ChangeVersion(ctx context.Context) (int64, error) {
+	var v int64
+	err := db.QueryRowContext(ctx, `SELECT version FROM changes`).Scan(&v)
+	return v, err
+}

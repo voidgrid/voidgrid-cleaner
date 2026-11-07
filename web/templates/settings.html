@@ -1,0 +1,13 @@
+{{define "content"}}
+<h1>settings</h1>
+{{with .Settings}}
+{{if .Saved}}<p class="muted" role="status">saved.</p>{{end}}
+<form class="editor" method="post" action="/settings">
+    <h2>delete window</h2>
+    <p class="muted">deletions only run between these times ({{.Zone}}). anything due outside them waits for the window to open. leave both empty to delete at any time.</p>
+    <label>from <input type="time" name="window_start" value="{{.Window.Start}}"></label>
+    <label>until <input type="time" name="window_end" value="{{.Window.End}}"></label>
+    <button type="submit">save</button>
+</form>
+{{end}}
+{{end}}

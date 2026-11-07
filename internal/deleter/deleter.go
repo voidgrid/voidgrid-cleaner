@@ -95,8 +95,18 @@ func (w *Worker) Loop(ctx context.Context, every time.Duration) {
 
 // Tick sends due notifications and runs everything that's due.
 func (w *Worker) Tick(ctx context.Context) {
-	if err := w.notify(ctx); err != nil {
+	window, err := w.DB.DeleteWindow(ctx)
+	if err != nil {
+		log.Printf("deleter: delete window: %v", err) // not knowing it means not deleting
+		return
+	}
+	if err := w.notify(ctx, window); err != nil {
 		log.Printf("deleter: notify: %v", err)
+	}
+	// Times are already set to fall in the window; this covers a window
+	// changed after they were set.
+	if !window.Contains(w.Now()) {
+		return
 	}
 	for ctx.Err() == nil {
 		d, found, err := w.DB.ClaimDueDeletion(ctx, w.Now())
@@ -111,7 +121,7 @@ func (w *Worker) Tick(ctx context.Context) {
 	}
 }
 
-func (w *Worker) notify(ctx context.Context) error {
+func (w *Worker) notify(ctx context.Context, window storage.DeleteWindow) error {
 	if w.Now().Before(w.notifyAfter) || (w.Notify == nil && !w.DryRun) {
 		return nil
 	}
@@ -120,7 +130,7 @@ func (w *Worker) notify(ctx context.Context) error {
 		return err
 	}
 	for _, d := range ds {
-		after := w.Now().Add(storage.DeletionDelay)
+		after := window.Next(w.Now().Add(storage.DeletionDelay))
 		// <t:...> shows in each reader's own time zone.
 		text := fmt.Sprintf("**%s** will be deleted <t:%d:f> unless someone presses Keep.", d.Title, after.Unix())
 		if d.DryRun || w.DryRun {
@@ -156,7 +166,11 @@ func (w *Worker) run(ctx context.Context, d storage.Deletion) {
 	switch {
 	case errors.As(err, &busy):
 		log.Printf("deleter: %s: pushed back: %s", d.Title, busy.reason)
-		if err := w.DB.PushBackDeletion(ctx, d.ID, w.Now().Add(playingWait), busy.reason); err != nil {
+		until := w.Now().Add(playingWait)
+		if window, err := w.DB.DeleteWindow(ctx); err == nil {
+			until = window.Next(until)
+		}
+		if err := w.DB.PushBackDeletion(ctx, d.ID, until, busy.reason); err != nil {
 			log.Printf("deleter: push back: %v", err)
 		}
 		return

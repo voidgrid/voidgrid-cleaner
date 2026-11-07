@@ -695,3 +695,151 @@ func TestDiscordUserLinkAdminOnly(t *testing.T) {
 		t.Fatalf("non-admin link: %d", resp.StatusCode)
 	}
 }
+
+func TestLibraryPaging(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	secs := []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}}
+	var ms []storage.Media
+	for i := range 40 {
+		ms = append(ms, storage.Media{RatingKey: strconv.Itoa(100 + i), SectionKey: "1", Type: "movie", Title: fmt.Sprintf("Film %02d", i)})
+	}
+	if err := s.DB.ReplaceLibrary(ctx, secs, ms); err != nil {
+		t.Fatal(err)
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	cards := func(b string) int { return strings.Count(b, `<li id="card-`) }
+
+	b := body(t, get(t, c, app.URL+"/library/1?sort=newest"))
+	if cards(b) != 32 || !strings.Contains(b, ">40 movies") || !strings.Contains(b, `offset=32`) || !strings.Contains(b, `sort=newest`) {
+		t.Fatalf("first page: %d cards: %s", cards(b), b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1?offset=32")); cards(b) != 8 || strings.Contains(b, `id="more"`) {
+		t.Fatalf("last page: %d cards", cards(b))
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1?limit=40")); cards(b) != 40 || strings.Contains(b, `id="more"`) {
+		t.Fatalf("refresh of everything loaded: %d cards", cards(b))
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1?limit=-1&offset=x")); cards(b) != 32 {
+		t.Fatalf("bad values: %d cards", cards(b))
+	}
+}
+
+func TestChangesVersion(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	anon := &http.Client{Transport: c.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if resp := get(t, anon, app.URL+"/changes"); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("signed out: %d", resp.StatusCode)
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	version := func() int64 {
+		t.Helper()
+		var v struct {
+			Version int64 `json:"version"`
+		}
+		if err := json.Unmarshal([]byte(body(t, get(t, c, app.URL+"/changes"))), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v.Version
+	}
+	ctx := context.Background()
+	steps := []struct {
+		name string
+		fn   func() error
+	}{
+		{"status", func() error { return s.DB.SetItemStatus(ctx, "10", storage.StatusKeep, 1) }},
+		{"normal", func() error { return s.DB.SetItemStatus(ctx, "10", storage.StatusNormal, 1) }},
+		{"schedule", func() error { _, err := s.DB.ScheduleDeletion(ctx, "11", 1, true); return err }},
+		{"keep", func() error {
+			ds, _ := s.DB.ActiveDeletions(ctx, storage.User{IsAdmin: true})
+			_, _, err := s.DB.KeepFromDiscord(ctx, ds[0].ID, "900", "x")
+			return err
+		}},
+		{"link", func() error { _, err := s.DB.SetDiscordUser(ctx, "900", 2); return err }},
+	}
+	for _, st := range steps {
+		before := version()
+		if err := st.fn(); err != nil {
+			t.Fatalf("%s: %v", st.name, err)
+		}
+		if version() <= before {
+			t.Fatalf("%s didn't bump the version", st.name)
+		}
+	}
+}
+
+func TestWarmPosters(t *testing.T) {
+	_, _, s := newTestApp(t, 0)
+	seedLibrary(t, s) // two good thumbs and one Plex can't serve
+	ctx := context.Background()
+	fp := s.Posters.(*fakePosters)
+	if n := s.WarmPosters(ctx); n != 2 {
+		t.Fatalf("fetched %d", n)
+	}
+	before := fp.calls.Load()
+	if n := s.WarmPosters(ctx); n != 0 {
+		t.Fatalf("fetched %d cached posters", n)
+	}
+	if got := fp.calls.Load() - before; got != 1 { // only the broken one is tried again
+		t.Fatalf("%d calls, want 1", got)
+	}
+
+	// Plex down: give up rather than wait out every poster.
+	var ms []storage.Media
+	for i := range 20 {
+		ms = append(ms, storage.Media{RatingKey: strconv.Itoa(100 + i), SectionKey: "1", Type: "movie", Title: "x", Thumb: "/bad/" + strconv.Itoa(i)})
+	}
+	if err := s.DB.ReplaceLibrary(ctx, []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}}, ms); err != nil {
+		t.Fatal(err)
+	}
+	before = fp.calls.Load()
+	if n := s.WarmPosters(ctx); n != 0 {
+		t.Fatalf("fetched %d", n)
+	}
+	if got := fp.calls.Load() - before; got != warmFailures {
+		t.Fatalf("%d calls, want %d", got, warmFailures)
+	}
+}
+
+func TestSettingsPage(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	form := url.Values{"window_start": {"03:00"}, "window_end": {"05:00"}}
+	if resp := get(t, c, app.URL+"/settings"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin GET: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/settings", form); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin POST: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/")); strings.Contains(b, `href="/settings"`) {
+		t.Fatal("non-admin sees the settings link")
+	}
+
+	app, c, s = newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if resp := postForm(t, c, app.URL+"/settings", form); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/settings?saved=1")); !strings.Contains(b, `value="03:00"`) || !strings.Contains(b, "saved.") {
+		t.Fatalf("settings: %s", b)
+	}
+	resp := postForm(t, c, app.URL+"/settings", url.Values{"window_start": {"03:00"}})
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "set both times") {
+		t.Fatalf("half a window: %d %s", resp.StatusCode, b)
+	}
+	if w, _ := s.DB.DeleteWindow(ctx); w.End != "05:00" {
+		t.Fatalf("a bad save changed it: %+v", w)
+	}
+	if resp := postForm(t, c, app.URL+"/settings", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("clear: %d", resp.StatusCode)
+	}
+	if w, _ := s.DB.DeleteWindow(ctx); w != (storage.DeleteWindow{}) {
+		t.Fatalf("not cleared: %+v", w)
+	}
+}

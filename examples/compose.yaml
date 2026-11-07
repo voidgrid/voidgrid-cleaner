@@ -7,6 +7,7 @@ services:
     ports:
       - "8790:8790"
     environment:
+      TZ: Etc/UTC
       VGC_SEERR_URL: http://seerr:5055
       VGC_SEERR_API_KEY: CHANGEME
       VGC_PLEX_URL: http://192.0.2.10:32400

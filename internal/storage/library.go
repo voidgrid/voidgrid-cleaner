@@ -320,6 +320,7 @@ type LibraryItem struct {
 	DeletionID  int64  // pending deletion, 0 if none
 	DeleteAfter int64  // its time, 0 until the notification is confirmed
 	KeptBy      string // who set the status from Discord, "" if it was set in the app
+	Total       int    // everything matching the filter, ignoring Limit
 }
 
 // Item statuses. Ephemeral is for shows only.
@@ -344,6 +345,7 @@ type LibraryFilter struct {
 	AddedDays        int    // added at least this many days ago
 	UnwatchedDays    int    // nobody watched it in this many days, never-watched included
 	RequesterWatched bool   // someone who requested it has watched it
+	Limit, Offset    int    // a window of the results; Limit 0 means all
 }
 
 // likeEscaper makes a search match its text literally in a LIKE pattern.
@@ -393,7 +395,8 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 			coalesce((SELECT coalesce(u.display_name, du.name) FROM item_status st
 				JOIN discord_users du ON du.discord_id = st.set_by_discord
 				LEFT JOIN users u ON u.seerr_user_id = du.seerr_user_id
-				WHERE st.rating_key = m.rating_key), '')
+				WHERE st.rating_key = m.rating_key), ''),
+			count(*) OVER ()
 		FROM media m LEFT JOIN deletions d ON d.rating_key = m.rating_key AND d.state IN ('scheduled', 'notified', 'executing')
 		WHERE m.section_key = ?`
 	args := []any{sectionKey}
@@ -434,6 +437,10 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 	default:
 		q += ` ORDER BY m.title COLLATE NOCASE, m.year`
 	}
+	if f.Limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, f.Limit, f.Offset)
+	}
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -444,7 +451,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		var it LibraryItem
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.Total); err != nil {
 			return nil, err
 		}
 		out = append(out, it)

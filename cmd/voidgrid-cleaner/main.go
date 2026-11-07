@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	_ "time/tzdata" // the image has no zoneinfo, and TZ sets the delete window's clock
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/discord"
@@ -120,6 +121,7 @@ func run() error {
 	// shortcut: fixed hourly interval, make it a setting if anyone needs another.
 	go syncer.Loop(stop, time.Hour)
 	go worker.Loop(stop, time.Minute)
+	go s.WarmLoop(stop, time.Hour)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

@@ -388,3 +388,102 @@ func TestPlexAccountLinks(t *testing.T) {
 		t.Fatalf("after unlink: watched %d, unlinked %d", watched(), unlinked())
 	}
 }
+
+// Years of accounts: several Plex accounts, one person.
+func TestManyPlexAccountsOneUser(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	secs := []Section{{Key: "1", Title: "Movies", Type: "movie"}}
+	movies := []Media{
+		{RatingKey: "1", SectionKey: "1", Type: "movie", Title: "a"},
+		{RatingKey: "2", SectionKey: "1", Type: "movie", Title: "b"},
+		{RatingKey: "3", SectionKey: "1", Type: "movie", Title: "c"},
+	}
+	if err := db.ReplaceLibrary(ctx, secs, movies); err != nil {
+		t.Fatal(err)
+	}
+	// This user has a Plex ID in Seerr too; old accounts add to it.
+	if err := db.UpsertUser(ctx, User{SeerrID: 2, Name: "x", PlexID: sql.NullInt64{Int64: 700, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	rk := func(k string) sql.NullString { return sql.NullString{String: k, Valid: true} }
+	if err := db.ReplaceRequests(ctx, []Request{
+		{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: rk("1")},
+		{SeerrRequestID: 2, SeerrUserID: 2, RatingKey: rk("2")},
+		{SeerrRequestID: 3, SeerrUserID: 2, RatingKey: rk("3")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplacePlays(ctx, []Play{
+		{ReferenceID: 1, PlexUserID: 700, RatingKey: "1", ShowRatingKey: "1", Watched: true},
+		{ReferenceID: 2, PlexUserID: 501, RatingKey: "2", ShowRatingKey: "2", Watched: true},
+		{ReferenceID: 3, PlexUserID: 502, RatingKey: "3", ShowRatingKey: "3", Watched: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{501, 502} {
+		if found, err := db.SetPlexAccount(ctx, id, 2, 1); err != nil || !found {
+			t.Fatal(id, found, err)
+		}
+	}
+	items, err := db.LibraryItems(ctx, User{IsAdmin: true}, "1", LibraryFilter{RequesterWatched: true})
+	if err != nil || len(items) != 3 {
+		t.Fatalf("%+v %v", items, err)
+	}
+	if as, _ := db.PlexAccounts(ctx); len(as) != 2 || as[0].SeerrID != 2 || as[1].SeerrID != 2 {
+		t.Fatalf("%+v", as)
+	}
+}
+
+func TestDeleteWindowTimes(t *testing.T) {
+	at := func(h, m int) time.Time { return time.Date(2026, 1, 5, h, m, 0, 0, time.UTC) }
+	day := DeleteWindow{Start: "03:00", End: "05:00"}
+	overnight := DeleteWindow{Start: "23:00", End: "02:00"}
+	for name, c := range map[string]struct {
+		w    DeleteWindow
+		t    time.Time
+		in   bool
+		next time.Time
+	}{
+		"off":              {DeleteWindow{}, at(12, 0), true, at(12, 0)},
+		"at the start":     {day, at(3, 0), true, at(3, 0)},
+		"inside":           {day, at(4, 59), true, at(4, 59)},
+		"at the end":       {day, at(5, 0), false, at(3, 0).AddDate(0, 0, 1)},
+		"before":           {day, at(2, 59), false, at(3, 0)},
+		"overnight late":   {overnight, at(23, 30), true, at(23, 30)},
+		"overnight early":  {overnight, at(1, 0), true, at(1, 0)},
+		"overnight closed": {overnight, at(12, 0), false, at(23, 0)},
+		"overnight at end": {overnight, at(2, 0), false, at(23, 0)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := c.w.Contains(c.t); got != c.in {
+				t.Fatalf("Contains: %v", got)
+			}
+			if got := c.w.Next(c.t); !got.Equal(c.next) {
+				t.Fatalf("Next: %v", got)
+			}
+		})
+	}
+	for _, w := range []DeleteWindow{{Start: "03:00"}, {End: "03:00"}, {Start: "03:00", End: "03:00"}, {Start: "x", End: "03:00"}, {Start: "25:00", End: "03:00"}} {
+		if w.Validate() == nil {
+			t.Fatalf("%+v passed", w)
+		}
+		if w.Contains(at(3, 0)) {
+			t.Fatalf("%+v must contain nothing", w)
+		}
+	}
+	db := openTest(t)
+	ctx := context.Background()
+	if w, err := db.DeleteWindow(ctx); err != nil || w != (DeleteWindow{}) {
+		t.Fatal(w, err)
+	}
+	if err := db.SetDeleteWindow(ctx, DeleteWindow{Start: "03:00"}); err == nil {
+		t.Fatal("saved a bad window")
+	}
+	if err := db.SetDeleteWindow(ctx, day); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := db.DeleteWindow(ctx); err != nil || w != day {
+		t.Fatal(w, err)
+	}
+}
