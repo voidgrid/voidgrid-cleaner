@@ -13,6 +13,9 @@
     <h2>admin notices</h2>
     <p class="muted">who gets tagged on discord when someone unlinked presses add me. a discord user ID. default: the server owner.</p>
     <label>discord user <input type="text" name="admin_discord" inputmode="numeric" value="{{.AdminDiscord}}"></label>
+    <h2>daily digest</h2>
+    <p class="muted">a summary posted to discord once a day of what's going in the next day, plus a tech post for the admin channel if one is set. nothing is posted on a day with nothing to say. default: {{.DefaultDigest}} ({{.Zone}}).</p>
+    <label>post at <input type="time" name="digest_time" value="{{.DigestTime}}"></label>
     <h2>log level</h2>
     <p class="muted">normal records who decided what, and each step of a deletion. audit also records every call the app makes to another service while acting: method, path and result. default: {{.DefaultLevel}}.</p>
     <label>level

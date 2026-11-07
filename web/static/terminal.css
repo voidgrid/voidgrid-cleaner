@@ -82,6 +82,24 @@ th {
     color: var(--fg-bright);
 }
 
+/* On a phone, a table too wide for the screen scrolls on its own, so the page
+   doesn't, and words stay whole. Only very long names break. */
+@media (max-width: 40rem) {
+    main {
+        padding: 1rem;
+    }
+
+    table {
+        display: block;
+        overflow-x: auto;
+    }
+
+    th, td {
+        padding: 0.3rem 0.4rem;
+        overflow-wrap: break-word;
+    }
+}
+
 form.stack {
     display: flex;
     flex-direction: column;

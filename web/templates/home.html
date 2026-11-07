@@ -26,6 +26,15 @@
 {{else}}
 <p class="muted">nothing scheduled for deletion.</p>
 {{end}}
+{{if .Waiting}}
+<h2>ephemeral shows waiting on someone</h2>
+<table>
+    <thead><tr><th>show</th><th>episodes</th><th>waiting on</th></tr></thead>
+    <tbody>
+    {{range .Waiting}}<tr><td>{{.Title}}</td><td>{{.Episodes}}</td><td>{{.Who}}</td></tr>{{end}}
+    </tbody>
+</table>
+{{end}}
 {{if .Recent}}
 <h2>recent</h2>
 <table>

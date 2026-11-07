@@ -138,3 +138,35 @@ func TestAlertAndAnnounce(t *testing.T) {
 		t.Fatal(owner, err)
 	}
 }
+
+func TestPostAndAdminChannel(t *testing.T) {
+	var paths []string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"id":"1"}`))
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	c := &Client{BaseURL: srv.URL, Token: "t", Channel: "55"}
+	if err := c.Post(ctx, true, "x"); err == nil {
+		t.Fatal("posted the admin digest to the main channel")
+	}
+	if err := c.Alert(ctx, "x", ""); err != nil || paths[0] != "/channels/55/messages" {
+		t.Fatal(paths, err)
+	}
+	c.AdminChannel = "66"
+	if err := c.Post(ctx, true, "hi @everyone"); err != nil || paths[1] != "/channels/66/messages" {
+		t.Fatal(paths, err)
+	}
+	if got["allowed_mentions"].(map[string]any)["parse"] == nil {
+		t.Fatalf("a digest could ping: %v", got)
+	}
+	if err := c.Alert(ctx, "x", ""); err != nil || paths[2] != "/channels/66/messages" {
+		t.Fatal(paths, err)
+	}
+	if err := c.Post(ctx, false, "x"); err != nil || paths[3] != "/channels/55/messages" {
+		t.Fatal(paths, err)
+	}
+}

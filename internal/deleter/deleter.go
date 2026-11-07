@@ -67,6 +67,7 @@ type (
 		Notify(ctx context.Context, text string, deletionID int64) error
 		Announce(ctx context.Context, text, ratingKey string) error
 		Alert(ctx context.Context, text, userID string) error
+		Post(ctx context.Context, admin bool, text string) error
 	}
 )
 
@@ -82,6 +83,8 @@ type Worker struct {
 	Notify   Notifier
 	DryRun   bool
 	Now      func() time.Time
+	// AdminChannel says a tech alerts channel is set.
+	AdminChannel bool
 
 	notifyAfter time.Time
 	spaceAfter  time.Time
@@ -145,6 +148,9 @@ func (w *Worker) Tick(ctx context.Context) {
 	}
 	if err := w.announce(ctx); err != nil {
 		log.Printf("deleter: announce: %v", err)
+	}
+	if err := w.digest(ctx); err != nil {
+		log.Printf("deleter: digest: %v", err)
 	}
 	// Times are already set to fall in the window; this covers a window
 	// changed after they were set.

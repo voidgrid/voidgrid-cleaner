@@ -599,3 +599,41 @@ func TestQueueFixesIsOneBatchAndLogsEach(t *testing.T) {
 		t.Fatalf("%d jobs, %d entries", len(js), len(es))
 	}
 }
+
+func TestEpisodeWaitsNameWhoIsBehind(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "2", Title: "TV", Type: "show"}}, []Media{{RatingKey: "1", SectionKey: "2", Type: "show", Title: "Max Headroom", AddedAt: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []User{{SeerrID: 2, Name: "Ann", PlexID: sql.NullInt64{Int64: 5, Valid: true}}, {SeerrID: 3, Name: "Bob", PlexID: sql.NullInt64{Int64: 6, Valid: true}}} {
+		if err := db.UpsertUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.ReplaceRequests(ctx, []Request{{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: sql.NullString{String: "1", Valid: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "1", StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddWatcher(ctx, "1", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplacePlexViews(ctx, []Play{{ReferenceID: -1, PlexUserID: 5, MediaType: "episode", RatingKey: "11", ShowRatingKey: "1", Season: 1, Episode: 1, Watched: true, Stopped: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := db.EpisodeWaits(ctx)
+	if err != nil || len(ws) != 1 || ws[0].Who != "Bob" || ws[0].Episodes != 1 {
+		t.Fatalf("%+v %v", ws, err)
+	}
+}
+
+func TestParseDigestTime(t *testing.T) {
+	if s, err := ParseDigestTime(""); err != nil || s != DefaultDigestTime {
+		t.Fatal(s, err)
+	}
+	if _, err := ParseDigestTime("25:00"); err == nil {
+		t.Fatal("accepted 25:00")
+	}
+}

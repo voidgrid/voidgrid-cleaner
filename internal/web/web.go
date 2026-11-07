@@ -115,6 +115,8 @@ type settingsPage struct {
 	AdminDiscord  string
 	LogExpiry     string
 	LogLevel      string
+	DigestTime    string
+	DefaultDigest string
 	DefaultLevel  string
 	DefaultExpiry int
 	Paths         []storage.LibraryPath
@@ -125,6 +127,8 @@ type statusPage struct {
 	DryRun bool
 	Active []storage.Deletion
 	Recent []storage.Deletion
+	// Waiting lists ephemeral shows with episodes someone on them hasn't seen.
+	Waiting []storage.EpisodeWait
 }
 
 // PosterSource returns a Plex thumb resized to width x height as JPEG.
@@ -802,7 +806,13 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "home", page{User: &u, Status: &statusPage{DryRun: s.DryRun, Active: storage.ByShow(active), Recent: storage.ByShow(recent)}})
+	waiting, err := s.DB.EpisodeWaits(r.Context())
+	if err != nil {
+		log.Printf("web: episode waits: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "home", page{User: &u, Status: &statusPage{DryRun: s.DryRun, Active: storage.ByShow(active), Recent: storage.ByShow(recent), Waiting: waiting}})
 }
 
 func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
@@ -987,6 +997,12 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	digestAt, err := s.DB.DigestTime(r.Context())
+	if err != nil {
+		log.Printf("web: digest time: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	paths, err := s.DB.LibraryPaths(r.Context())
 	if err != nil {
 		log.Printf("web: library paths: %v", err)
@@ -994,7 +1010,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, http.StatusOK, "settings", page{User: &u, Settings: &settingsPage{
-		LogLevel: level, DefaultLevel: storage.DefaultLogLevel,
+		LogLevel: level, DefaultLevel: storage.DefaultLogLevel, DigestTime: digestAt, DefaultDigest: storage.DefaultDigestTime,
 		Window: win, Zone: time.Now().Format("MST"), SpaceLimit: strconv.Itoa(limit), DefaultSpace: storage.DefaultSpaceLimit,
 		DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: strconv.Itoa(expiry), DefaultExpiry: storage.DefaultLogExpiry, Paths: paths, Saved: r.URL.Query().Get("saved") == "1",
 	}})
@@ -1017,6 +1033,11 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		expiry, err = storage.ParseLogExpiry(expiryForm)
 	}
+	digestForm := r.PostFormValue("digest_time")
+	var digestAt string
+	if err == nil {
+		digestAt, err = storage.ParseDigestTime(digestForm)
+	}
 	levelForm := r.PostFormValue("log_level")
 	var level string
 	if err == nil {
@@ -1033,7 +1054,7 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// A 200: a typo here shouldn't count towards a proxy ban.
 		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{
-			LogLevel: levelForm, DefaultLevel: storage.DefaultLogLevel,
+			LogLevel: levelForm, DefaultLevel: storage.DefaultLogLevel, DigestTime: digestForm, DefaultDigest: storage.DefaultDigestTime,
 			Window: win, Zone: time.Now().Format("MST"), SpaceLimit: spaceForm, DefaultSpace: storage.DefaultSpaceLimit,
 			DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: expiryForm, DefaultExpiry: storage.DefaultLogExpiry, Paths: paths,
 		}})
@@ -1051,6 +1072,9 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		err = s.DB.SetLogLevel(r.Context(), level)
+	}
+	if err == nil {
+		err = s.DB.SetDigestTime(r.Context(), digestAt)
 	}
 	if err == nil {
 		err = s.DB.SetManagedPaths(r.Context(), r.PostForm["managed"])

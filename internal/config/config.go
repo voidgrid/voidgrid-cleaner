@@ -31,7 +31,9 @@ type Config struct {
 	DiscordBotToken  string
 	DiscordPublicKey ed25519.PublicKey
 	DiscordChannel   string
-	DeleteLive       bool
+	// DiscordAdminChannel takes tech alerts; optional.
+	DiscordAdminChannel string
+	DeleteLive          bool
 }
 
 // Load reads VGC_* variables, applying defaults. Every service setting is
@@ -77,6 +79,14 @@ func Load() (Config, error) {
 		c.DiscordPublicKey = b
 		if _, err := strconv.ParseUint(c.DiscordChannel, 10, 64); err != nil {
 			return c, errors.New("config: VGC_DISCORD_CHANNEL must be a Discord channel ID")
+		}
+	}
+	if c.DiscordAdminChannel = os.Getenv("VGC_DISCORD_ADMIN_CHANNEL"); c.DiscordAdminChannel != "" {
+		if c.DiscordBotToken == "" {
+			return c, errors.New("config: VGC_DISCORD_ADMIN_CHANNEL needs the other VGC_DISCORD_ settings")
+		}
+		if _, err := strconv.ParseUint(c.DiscordAdminChannel, 10, 64); err != nil {
+			return c, errors.New("config: VGC_DISCORD_ADMIN_CHANNEL must be a Discord channel ID")
 		}
 	}
 	c.DeleteLive = os.Getenv("VGC_DELETE_LIVE") == "true"

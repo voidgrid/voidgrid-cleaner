@@ -42,6 +42,7 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_DISCORD_BOT_TOKEN` | for live deletion | | Discord bot token |
 | `VGC_DISCORD_PUBLIC_KEY` | for live deletion | | The Discord application's public key |
 | `VGC_DISCORD_CHANNEL` | for live deletion | | Channel ID for notifications |
+| `VGC_DISCORD_ADMIN_CHANNEL` | no | | Channel ID for tech alerts: the admin digest and unlinked Add me notices |
 | `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
 | `TZ` | no | `UTC` | Time zone for times on screen and the delete window, e.g. `Etc/UTC` |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
@@ -134,6 +135,13 @@ items since removed from Plex can't be tied to anything in the library.
 
 Plex reattaches old history when something is added again. Here a re-add starts clean: plays from before an item's added date
 don't count. Plex's own watched marks aren't changed.
+
+### Daily digest
+
+Once a day, at the time on the **settings** page (default 05:30), the bot posts what's going in the next day, the one thing
+anyone can still act on. It names shows, never episodes, tags nobody and has no buttons. What was deleted and which ephemeral
+shows are waiting on someone are on the **status** page instead. With `VGC_DISCORD_ADMIN_CHANNEL` set, a second post there covers failed or held deletions, sync errors, new doctor
+findings, unlinked users and disk levels. Days with nothing to say post nothing.
 
 ### Ephemeral shows
 

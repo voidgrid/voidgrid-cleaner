@@ -97,7 +97,8 @@ func run() error {
 		Now:      time.Now,
 	}
 	if cfg.DiscordBotToken != "" {
-		bot := &discord.Client{BaseURL: "https://discord.com/api/v10", Token: cfg.DiscordBotToken, Channel: cfg.DiscordChannel, HTTP: hc}
+		bot := &discord.Client{BaseURL: "https://discord.com/api/v10", Token: cfg.DiscordBotToken, Channel: cfg.DiscordChannel, AdminChannel: cfg.DiscordAdminChannel, HTTP: hc}
+		worker.AdminChannel = cfg.DiscordAdminChannel != ""
 		worker.Notify = bot
 		// The server owner is who admin notices tag until someone picks another.
 		if owner, err := bot.GuildOwner(ctx); err != nil {

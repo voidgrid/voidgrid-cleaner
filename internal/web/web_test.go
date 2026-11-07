@@ -1082,3 +1082,27 @@ func TestDoctorFixesAdminOnly(t *testing.T) {
 		t.Fatalf("apply: %d", resp.StatusCode)
 	}
 }
+
+func TestStatusShowsEphemeralWaits(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	// Sign in first: signing in records the user as Seerr has them, without the Plex ID set below.
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.UpsertUser(ctx, storage.User{SeerrID: 1, Name: "admin", IsAdmin: true, PlexID: sql.NullInt64{Int64: 5, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.AddWatcher(ctx, "20", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.ReplacePlexViews(ctx, []storage.Play{{ReferenceID: -1, PlexUserID: 5, MediaType: "episode", RatingKey: "21", ShowRatingKey: "20", Season: 1, Episode: 1, Watched: true, Stopped: time.Now().Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+	b := body(t, get(t, c, app.URL+"/"))
+	if !strings.Contains(b, "ephemeral shows waiting on someone") || !strings.Contains(b, "<td>Admins Show</td><td>1</td><td>bob</td>") {
+		t.Fatalf("%s", b)
+	}
+}

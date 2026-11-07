@@ -33,6 +33,8 @@ type fake struct {
 	episodes  []arr.Episode
 	posts     []string
 	plexNow   []plex.Session
+	digests   []string
+	postErr   error
 	plexErr   error
 }
 
@@ -62,6 +64,11 @@ func (f sonarr) DeleteEpisodeFile(_ context.Context, id int64) error {
 func (f *fake) Announce(_ context.Context, text, key string) error {
 	f.posts = append(f.posts, text)
 	return f.rec("announce %s", key)
+}
+
+func (f *fake) Post(_ context.Context, admin bool, text string) error {
+	f.digests = append(f.digests, fmt.Sprintf("%v:%s", admin, text))
+	return f.postErr
 }
 
 func (f *fake) Alert(_ context.Context, text, user string) error {
@@ -637,5 +644,115 @@ func TestLogLevelControlsCallRecording(t *testing.T) {
 	runDue(w2, now2)
 	if w2.auditCalls || count(w2) == 0 {
 		t.Fatal(w2.auditCalls, count(w2))
+	}
+}
+
+func TestDigestPostsOnceADayAfterItsTime(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	w.AdminChannel = true
+	*now = time.Date(2026, 11, 8, 5, 0, 0, 0, time.Local)
+	schedule(t, w, "10", false)
+	w.Tick(ctx) // notifies, so 10 is due within the day
+	if len(f.digests) != 0 {
+		t.Fatal("posted before its time")
+	}
+	*now = now.Add(31 * time.Minute)
+	w.Tick(ctx)
+	w.Tick(ctx)
+	if len(f.digests) != 1 || !strings.Contains(f.digests[0], "false:") || !strings.Contains(f.digests[0], "Managed") {
+		t.Fatalf("%q", f.digests)
+	}
+	if strings.Contains(f.digests[0], "@") {
+		t.Fatal("a digest must not tag anyone")
+	}
+}
+
+func TestDigestSkipsADayWithNothingToSay(t *testing.T) {
+	w, f, now := setup(t)
+	*now = time.Date(2026, 11, 8, 6, 0, 0, 0, time.Local)
+	w.Tick(context.Background())
+	if len(f.digests) != 0 {
+		t.Fatalf("%q", f.digests)
+	}
+	if sent, _ := w.DB.DigestSent(context.Background()); sent != "2026-11-08" {
+		t.Fatal("an empty day should still count as done", sent)
+	}
+}
+
+func TestDigestRetriesAFailedPost(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	*now = time.Date(2026, 11, 8, 5, 0, 0, 0, time.Local)
+	schedule(t, w, "10", false)
+	w.Tick(ctx)
+	*now = now.Add(time.Hour)
+	f.postErr = errors.New("discord down")
+	w.Tick(ctx)
+	if sent, _ := w.DB.DigestSent(ctx); sent != "" {
+		t.Fatal("marked sent after a failure")
+	}
+	f.postErr = nil
+	*now = now.Add(notifyRetry + time.Minute)
+	w.Tick(ctx)
+	if sent, _ := w.DB.DigestSent(ctx); sent != "2026-11-08" {
+		t.Fatal("not retried", sent)
+	}
+}
+
+func TestAdminDigestOnlyWithAChannel(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	if err := w.DB.SaveFindings(ctx, "naming", []storage.Finding{{Subject: "x", Title: "X", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	*now = time.Now().Add(24 * time.Hour)
+	if err := w.DB.SetDigestTime(ctx, "00:00"); err != nil {
+		t.Fatal(err)
+	}
+	w.Tick(ctx)
+	for _, d := range f.digests {
+		if strings.HasPrefix(d, "true:") {
+			t.Fatal("posted the admin digest with no admin channel")
+		}
+	}
+	w2, f2, now2 := setup(t)
+	w2.AdminChannel = true
+	if err := w2.DB.SaveFindings(ctx, "naming", []storage.Finding{{Subject: "x", Title: "X", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	*now2 = time.Now().Add(24 * time.Hour)
+	if err := w2.DB.SetDigestTime(ctx, "00:00"); err != nil {
+		t.Fatal(err)
+	}
+	w2.Tick(ctx)
+	if len(f2.digests) != 1 || !strings.HasPrefix(f2.digests[0], "true:") || !strings.Contains(f2.digests[0], "Doctor: 1 new") {
+		t.Fatalf("%q", f2.digests)
+	}
+}
+
+func TestDigestCutsLongListsShort(t *testing.T) {
+	var lines []string
+	for i := range 300 {
+		lines = append(lines, fmt.Sprintf("A Long Title Number %03d", i))
+	}
+	var b strings.Builder
+	section(&b, "Heading", lines)
+	if b.Len() > 2000 || !strings.Contains(b.String(), "more") {
+		t.Fatalf("%d: %s", b.Len(), b.String()[b.Len()-40:])
+	}
+}
+
+func TestMainDigestIsOnlyWhatsAboutToGo(t *testing.T) {
+	d := storage.Digest{Upcoming: []storage.Deletion{
+		{Title: "Film", DeleteAfter: 100},
+		{Title: "Show", DeleteAfter: 200, Episodes: 2},
+	}}
+	got := mainDigest(d)
+	if !strings.Contains(got, "Film <t:100:R>") || !strings.Contains(got, "Show, watched episodes (2) <t:200:R>") || strings.Contains(got, "Deleted") || strings.Contains(got, "waiting") {
+		t.Fatal(got)
+	}
+	if mainDigest(storage.Digest{}) != "" {
+		t.Fatal("an empty day should say nothing")
 	}
 }

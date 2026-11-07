@@ -29,7 +29,9 @@ type Client struct {
 	BaseURL string // https://discord.com/api/v10
 	Token   string
 	Channel string
-	HTTP    *http.Client
+	// AdminChannel takes tech alerts; "" sends admin notices to Channel.
+	AdminChannel string
+	HTTP         *http.Client
 }
 
 // Notify posts text with a Keep button for the deletion. It returns nil only
@@ -54,10 +56,14 @@ func (c *Client) Announce(ctx context.Context, text, ratingKey string) error {
 // Alert posts text tagging one user, or nobody if userID is empty. Only that
 // user can be pinged, whatever the text says.
 func (c *Client) Alert(ctx context.Context, text, userID string) error {
-	if userID == "" {
-		return c.post(ctx, map[string]any{"content": text, "allowed_mentions": noMentions})
+	ch := c.AdminChannel
+	if ch == "" {
+		ch = c.Channel
 	}
-	return c.post(ctx, map[string]any{
+	if userID == "" {
+		return c.postTo(ctx, ch, map[string]any{"content": text, "allowed_mentions": noMentions})
+	}
+	return c.postTo(ctx, ch, map[string]any{
 		"content":          "<@" + userID + "> " + text,
 		"allowed_mentions": map[string]any{"users": []string{userID}},
 	})
@@ -94,11 +100,28 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return httpjson.Do(ctx, c.HTTP, "discord", method, strings.TrimRight(c.BaseURL, "/")+path, hdr, body, out)
 }
 
+// Post sends plain text that can't ping anyone, to the admin channel if
+// admin is set, otherwise to the main one.
+func (c *Client) Post(ctx context.Context, admin bool, text string) error {
+	ch := c.Channel
+	if admin {
+		if c.AdminChannel == "" {
+			return errors.New("discord: no admin channel set")
+		}
+		ch = c.AdminChannel
+	}
+	return c.postTo(ctx, ch, map[string]any{"content": text, "allowed_mentions": noMentions})
+}
+
 func (c *Client) post(ctx context.Context, body map[string]any) error {
+	return c.postTo(ctx, c.Channel, body)
+}
+
+func (c *Client) postTo(ctx context.Context, channel string, body map[string]any) error {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/channels/"+c.Channel+"/messages", body, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/channels/"+channel+"/messages", body, &out); err != nil {
 		return err
 	}
 	if out.ID == "" {
