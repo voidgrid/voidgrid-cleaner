@@ -170,6 +170,9 @@ func titleMatch(it plex.Item, c counterpart) float64 {
 
 const minTitleMatch = 0.5
 
+// questionableMatches doesn't compare years: by this point the IDs agree, so
+// it's the right title and the sources simply date it differently, which no
+// fix can change.
 func (s *snapshot) questionableMatches() []storage.Finding {
 	var out []storage.Finding
 	add := func(lib library, it plex.Item, c counterpart, severity, why string) {
@@ -186,8 +189,6 @@ func (s *snapshot) questionableMatches() []storage.Finding {
 		case idsDisagree(lib, it, c): // a wrong match, reported as one
 		case !releaseName.MatchString(it.Title) && titleMatch(it, c) < minTitleMatch:
 			add(lib, it, c, check, fmt.Sprintf("%s calls this %q.", arrName(lib), c.title))
-		case c.year != 0 && it.Year != 0 && (it.Year-c.year > 1 || c.year-it.Year > 1):
-			add(lib, it, c, check, fmt.Sprintf("Plex says %d; %s says %d.", it.Year, arrName(lib), c.year))
 		}
 	})
 	return out

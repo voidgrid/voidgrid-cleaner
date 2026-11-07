@@ -336,13 +336,12 @@ func TestQuestionableMatches(t *testing.T) {
 		orig      string
 		want      int
 	}{
-		"same":                   {"Film", 2000, "Film", nil, "", 0},
-		"punctuation and the":    {"The Film!", 2000, "Film", nil, "", 0},
-		"different title":        {"Completely Else", 2000, "Film Night", nil, "", 1},
-		"alternate title counts": {"Fuck Me", 2000, "Baise-moi", []arr.AltTitle{{Title: "Fuck Me"}}, "", 0},
-		"original title counts":  {"Fuck Me", 2000, "Baise-moi", nil, "Baise-moi", 0},
-		"year far off":           {"Film", 2020, "Film", nil, "", 1},
-		"year one off is normal": {"Film", 2001, "Film", nil, "", 0},
+		"same":                                  {"Film", 2000, "Film", nil, "", 0},
+		"punctuation and the":                   {"The Film!", 2000, "Film", nil, "", 0},
+		"different title":                       {"Completely Else", 2000, "Film Night", nil, "", 1},
+		"alternate title counts":                {"Fuck Me", 2000, "Baise-moi", []arr.AltTitle{{Title: "Fuck Me"}}, "", 0},
+		"original title counts":                 {"Fuck Me", 2000, "Baise-moi", nil, "Baise-moi", 0},
+		"a year apart with the same ID is fine": {"Film", 2020, "Film", nil, "", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld(t)
