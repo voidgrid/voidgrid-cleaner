@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,12 @@ type fakePlex struct {
 	items map[string][]plex.Item
 	local bool
 	fail  error
+
+	matches    []plex.Match
+	calls      []string
+	takes      bool // a match applies
+	guidAfter  string
+	stuckLocal bool
 }
 
 func (f *fakePlex) Sections(context.Context) ([]plex.Section, error) { return f.secs, f.fail }
@@ -75,6 +82,43 @@ func (f *fakePlex) Items(_ context.Context, k string) ([]plex.Item, error) {
 	return f.items[k], nil
 }
 func (f *fakePlex) ShowPath(context.Context, string) (string, error) { return "", nil }
+func (f *fakePlex) Item(_ context.Context, k string) (plex.Item, error) {
+	for _, items := range f.items {
+		for _, it := range items {
+			if it.RatingKey == k {
+				if f.guidAfter != "" {
+					it.PlexGUID = f.guidAfter
+				}
+				return it, nil
+			}
+		}
+	}
+	return plex.Item{}, errors.New("no item")
+}
+
+func (f *fakePlex) Matches(context.Context, string, string, int, string) ([]plex.Match, error) {
+	return f.matches, nil
+}
+
+func (f *fakePlex) Match(_ context.Context, key, guid, name string) error {
+	f.calls = append(f.calls, "match "+key+" "+guid+" "+name)
+	if f.takes {
+		f.guidAfter = guid
+	}
+	return nil
+}
+
+func (f *fakePlex) SetPreferLocalMetadata(_ context.Context, k string, on bool) error {
+	f.calls = append(f.calls, fmt.Sprintf("prefs %s %v", k, on))
+	f.local = on || f.stuckLocal
+	return nil
+}
+
+func (f *fakePlex) RefreshMetadata(_ context.Context, k string) error {
+	f.calls = append(f.calls, "refresh "+k)
+	return nil
+}
+
 func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 	return f.local, nil
 }
@@ -417,5 +461,164 @@ func TestTVStrayFiles(t *testing.T) {
 	w.run(t)
 	if fs := w.open(t, KindStrayFile); len(fs) != 1 {
 		t.Fatalf("a failed read resolved the finding: %+v", fs)
+	}
+}
+
+func (w *world) wrongMatch(t *testing.T) storage.Finding {
+	t.Helper()
+	film := filepath.Join(w.root, "Film (2000)", "Film.mkv")
+	w.plex.items["1"] = []plex.Item{item(t, `{"ratingKey":"10","title":"Other","year":2000,"guid":"plex://movie/2","Guid":[{"id":"tmdb://555"}],"Media":[{"Part":[{"file":"`+film+`"}]}]}`)}
+	w.run(t)
+	fs := w.open(t, KindWrongMatch)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0]
+}
+
+func (w *world) fix(t *testing.T, f storage.Finding, choice string) storage.FixJob {
+	t.Helper()
+	ctx := context.Background()
+	if ok, err := w.d.DB.QueueFix(ctx, f.ID, choice, "admin"); err != nil || !ok {
+		t.Fatalf("queue: %v %v", ok, err)
+	}
+	if n := w.d.RunFixes(ctx); n != 1 {
+		t.Fatalf("ran %d", n)
+	}
+	js, err := w.d.DB.RecentFixes(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return js[0]
+}
+
+func TestPreviewChangesNothing(t *testing.T) {
+	w := newWorld(t)
+	f := w.wrongMatch(t)
+	w.plex.matches = []plex.Match{{GUID: "plex://movie/9", Name: "Film", Year: 2000}, {GUID: "plex://movie/2", Name: "Other", Year: 2000}}
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.CanFix || len(p.Choices) != 1 || p.Choices[0].Value != "plex://movie/9|Film" {
+		t.Fatalf("what it's matched to now isn't a choice: %+v", p)
+	}
+	if len(w.plex.calls) != 0 {
+		t.Fatalf("a preview changed something: %v", w.plex.calls)
+	}
+}
+
+func TestPreviewOfAnAlreadyRightMatchOffersNothing(t *testing.T) {
+	w := newWorld(t)
+	f := w.wrongMatch(t)
+	w.plex.matches = []plex.Match{{GUID: "plex://movie/2", Name: "Other", Year: 2000}}
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil || p.CanFix {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestFixIsVerified(t *testing.T) {
+	w := newWorld(t)
+	f := w.wrongMatch(t)
+	w.plex.takes = true
+	if j := w.fix(t, f, "plex://movie/9|Film"); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if got := strings.Join(w.plex.calls, "|"); got != "match 10 plex://movie/9 Film" {
+		t.Fatal(got)
+	}
+	es, _ := w.d.DB.AuditLog(context.Background(), "doctor fix", 10, 0)
+	if len(es) != 1 || es[0].Who != "admin" {
+		t.Fatalf("%+v", es)
+	}
+}
+
+func TestFixThatDoesntTakeFails(t *testing.T) {
+	w := newWorld(t)
+	f := w.wrongMatch(t)
+	if j := w.fix(t, f, "plex://movie/9|Film"); j.State != "failed" || !strings.Contains(j.Detail, "still isn't") {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestFixRefusesABadChoice(t *testing.T) {
+	w := newWorld(t)
+	f := w.wrongMatch(t)
+	if j := w.fix(t, f, "not-a-guid"); j.State != "failed" || len(w.plex.calls) != 0 {
+		t.Fatalf("%+v %v", j, w.plex.calls)
+	}
+}
+
+func TestFixSkipsItemBeingDeleted(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	f := w.wrongMatch(t)
+	if err := w.d.DB.ReplaceLibrary(ctx, []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}}, []storage.Media{{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "Film"}}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := w.d.DB.ScheduleDeletion(ctx, "10", 1, true, storage.KindManual); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if j := w.fix(t, f, "plex://movie/9|Film"); j.State != "skipped" || len(w.plex.calls) != 0 {
+		t.Fatalf("%+v %v", j, w.plex.calls)
+	}
+}
+
+func TestFixSkipsDismissedFinding(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	f := w.wrongMatch(t)
+	if _, err := w.d.DB.SetFindingState(ctx, f.ID, "dismissed"); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, "plex://movie/9|Film"); j.State != "skipped" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestPreferLocalFix(t *testing.T) {
+	w := newWorld(t)
+	w.plex.local = true
+	w.run(t)
+	var f storage.Finding
+	for _, s := range w.open(t, KindSettings) {
+		if Fixable(s.Kind, s.Subject) {
+			f = s
+		}
+	}
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if got := strings.Join(w.plex.calls, "|"); got != "prefs 1 false|refresh 1" {
+		t.Fatal(got)
+	}
+}
+
+func TestPreferLocalFixStopsIfSettingStays(t *testing.T) {
+	w := newWorld(t)
+	w.plex.local, w.plex.stuckLocal = true, true
+	w.run(t)
+	fs := w.open(t, KindSettings)
+	if j := w.fix(t, fs[0], ""); j.State != "failed" || strings.Contains(strings.Join(w.plex.calls, "|"), "refresh") {
+		t.Fatalf("%+v %v", j, w.plex.calls)
+	}
+}
+
+func TestInterruptedFixDoesntResume(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	f := w.wrongMatch(t)
+	if _, err := w.d.DB.QueueFix(ctx, f.ID, "x", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := w.d.DB.ClaimFix(ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	if err := w.d.DB.FailInterruptedFixes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := w.d.RunFixes(ctx); n != 0 {
+		t.Fatal(n)
 	}
 }

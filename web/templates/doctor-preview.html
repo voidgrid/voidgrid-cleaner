@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>doctor: preview</h1>
+{{with .Doctor}}
+<p class="muted">nothing has changed yet. this is what will happen.</p>
+<form method="post" action="/doctor/apply">
+    {{range .Previews}}
+    <section>
+        <h2>{{.Finding.Title}}</h2>
+        {{range .Lines}}<p>{{.}}</p>{{end}}
+        {{$id := .Finding.ID}}
+        {{if .CanFix}}
+        <input type="hidden" name="id" value="{{$id}}">
+        {{if .Choices}}
+        <label class="check"><input type="radio" name="choice-{{$id}}" value="" checked> leave it as it is</label>
+        {{range .Choices}}<label class="check"><input type="radio" name="choice-{{$id}}" value="{{.Value}}"> {{.Label}}</label>{{end}}
+        {{end}}
+        {{end}}
+    </section>
+    {{end}}
+    <div class="actions">
+        <button type="submit">apply</button>
+        <a href="/doctor">back</a>
+    </div>
+</form>
+{{end}}
+{{end}}

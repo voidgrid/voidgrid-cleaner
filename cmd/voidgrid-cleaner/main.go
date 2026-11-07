@@ -137,12 +137,15 @@ func run() error {
 	go s.WarmLoop(stop, time.Hour)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	checkup := &doctor.Doctor{
-		DB:     db,
-		Radarr: arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
-		Sonarr: arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
-		Plex:   &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
-		Seerr:  sc,
+		DB:      db,
+		Radarr:  arr.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey, slow),
+		Sonarr:  arr.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey, slow),
+		Plex:    &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: slow},
+		Seerr:   sc,
+		FixWait: 3 * time.Second,
 	}
+	s.Previews = checkup
+	go checkup.FixLoop(stop, 2*time.Second)
 	syncer.After = func(ctx context.Context) { checkup.Run(ctx) }
 	s.DoctorNow = func() { go checkup.Run(stop) }
 	errc := make(chan error, 1)

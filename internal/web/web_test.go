@@ -1019,3 +1019,66 @@ func TestManagedPathsSurviveABadSave(t *testing.T) {
 		t.Fatalf("error page lost the paths: %s", b)
 	}
 }
+
+type fakePreviewer struct{ err error }
+
+func (f fakePreviewer) Preview(_ context.Context, fd storage.Finding) (doctor.Preview, error) {
+	return doctor.Preview{Finding: fd, Lines: []string{"will rematch"}, CanFix: true, Choices: []doctor.Choice{{Value: "plex://movie/9|Film", Label: "Film (2000)"}}}, f.err
+}
+
+func TestDoctorPreviewAndApply(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	s.Previews = fakePreviewer{}
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.SaveFindings(ctx, doctor.KindWrongMatch, []storage.Finding{{Subject: "1", Title: "Bad Match", Severity: "problem"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindNaming, []storage.Finding{{Subject: "2", Title: "Report Only", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := s.DB.Findings(ctx, "open")
+	var fixable, reportOnly string
+	for _, f := range fs {
+		if f.Kind == doctor.KindWrongMatch {
+			fixable = strconv.FormatInt(f.ID, 10)
+		} else {
+			reportOnly = strconv.FormatInt(f.ID, 10)
+		}
+	}
+	b := body(t, get(t, c, app.URL+"/doctor"))
+	if !strings.Contains(b, `form="fix" name="id" value="`+fixable+`"`) || strings.Contains(b, `value="`+reportOnly+`"`) {
+		t.Fatalf("checkboxes: %s", b)
+	}
+	b = body(t, get(t, c, app.URL+"/doctor/preview?id="+fixable+"&id="+reportOnly))
+	if !strings.Contains(b, "will rematch") || !strings.Contains(b, "Film (2000)") || strings.Contains(b, "Report Only") {
+		t.Fatalf("preview: %s", b)
+	}
+	if js, _ := s.DB.RecentFixes(ctx, 5); len(js) != 0 {
+		t.Fatal("a preview queued something")
+	}
+	// "leave it as it is" queues nothing.
+	postForm(t, c, app.URL+"/doctor/apply", url.Values{"id": {fixable}, "choice-" + fixable: {""}})
+	if js, _ := s.DB.RecentFixes(ctx, 5); len(js) != 0 {
+		t.Fatal("leaving it queued a fix")
+	}
+	postForm(t, c, app.URL+"/doctor/apply", url.Values{"id": {fixable, reportOnly}, "choice-" + fixable: {"plex://movie/9|Film"}, "choice-" + reportOnly: {"x"}})
+	js, _ := s.DB.RecentFixes(ctx, 5)
+	if len(js) != 1 || js[0].Who != "admin" || js[0].Title != "Bad Match" {
+		t.Fatalf("%+v", js)
+	}
+}
+
+func TestDoctorFixesAdminOnly(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := get(t, c, app.URL+"/doctor/preview?id=1"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("preview: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/doctor/apply", url.Values{"id": {"1"}}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("apply: %d", resp.StatusCode)
+	}
+}

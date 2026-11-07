@@ -55,6 +55,8 @@ type Server struct {
 	SyncNow func()
 	// DoctorNow starts a doctor run in the background.
 	DoctorNow func()
+	// Previews says what doctor fixes would do.
+	Previews Previewer
 	// Posters resizes Plex artwork; PosterCache holds the results on disk.
 	Posters     PosterSource
 	PosterCache *os.Root
@@ -79,10 +81,17 @@ type page struct {
 	Log       *logPage
 }
 
+// Previewer builds fix previews.
+type Previewer interface {
+	Preview(context.Context, storage.Finding) (doctor.Preview, error)
+}
+
 type doctorPage struct {
 	Groups         []findingGroup
 	Dismissed      bool
 	DismissedCount int
+	Fixes          []storage.FixJob
+	Previews       []doctor.Preview
 }
 
 type findingGroup struct {
@@ -166,9 +175,10 @@ func init() {
 			}
 			return out
 		},
-		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
+		"fixable": doctor.Fixable,
+		"gb":      func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "log"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -218,6 +228,8 @@ func (s *Server) Router() http.Handler {
 			r.Get("/settings", s.settings)
 			r.Get("/doctor", s.doctor)
 			r.Post("/doctor/check", s.doctorCheck)
+			r.Get("/doctor/preview", s.doctorPreview)
+			r.Post("/doctor/apply", s.doctorApply)
 			r.Post("/doctor/{id}/dismiss", s.setFinding("dismissed"))
 			r.Post("/doctor/{id}/open", s.setFinding("open"))
 			r.Get("/log", s.auditLog)
@@ -632,7 +644,13 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other)}
+	fixes, err := s.DB.RecentFixes(r.Context(), recentFixes)
+	if err != nil {
+		log.Printf("web: fixes: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other), Fixes: fixes}
 	for _, l := range doctor.Labels {
 		g := findingGroup{Label: l.Label}
 		for _, f := range fs {
@@ -645,6 +663,80 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
+}
+
+// recentFixes is how many finished fixes the doctor page shows.
+const recentFixes = 15
+
+// doctorPreview shows what the ticked fixes would do. It changes nothing.
+func (s *Server) doctorPreview(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	p := &doctorPage{}
+	for _, v := range r.URL.Query()["id"] {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			continue
+		}
+		f, found, err := s.DB.Finding(r.Context(), id)
+		if err != nil {
+			log.Printf("web: finding: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !found || !doctor.Fixable(f.Kind, f.Subject) {
+			continue
+		}
+		pv, err := s.Previews.Preview(r.Context(), f)
+		if err != nil {
+			log.Printf("web: preview: %v", err)
+			pv = doctor.Preview{Finding: f, Lines: []string{"Couldn't build a preview, so this can't be fixed right now: " + err.Error()}}
+		}
+		p.Previews = append(p.Previews, pv)
+	}
+	if len(p.Previews) == 0 {
+		http.Redirect(w, r, "/doctor", http.StatusSeeOther)
+		return
+	}
+	render(w, http.StatusOK, "doctor-preview", page{User: &u, Doctor: p})
+}
+
+// doctorApply queues what the preview page approved.
+func (s *Server) doctorApply(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	u := userFrom(r.Context())
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	for _, v := range r.PostForm["id"] {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			continue
+		}
+		f, found, err := s.DB.Finding(r.Context(), id)
+		if err != nil {
+			log.Printf("web: finding: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !found || !doctor.Fixable(f.Kind, f.Subject) {
+			continue
+		}
+		choice := r.PostFormValue("choice-" + v)
+		if choice == "" && f.Kind != doctor.KindSettings {
+			continue // left as it is
+		}
+		queued, err := s.DB.QueueFix(r.Context(), id, choice, u.Name)
+		if err != nil {
+			log.Printf("web: queue fix: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if queued {
+			s.DB.Audit(r.Context(), u.Name, "doctor fix approved", f.Title, choice)
+		}
+	}
+	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
 }
 
 func (s *Server) doctorCheck(w http.ResponseWriter, r *http.Request) {

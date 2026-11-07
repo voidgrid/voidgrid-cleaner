@@ -103,6 +103,11 @@ names as titles, untracked folders, stale requests, files off the naming scheme,
 that can't be reached only skips the checks that need it, and their last results stay. Dismiss anything you've decided is
 fine, and it stays dismissed.
 
+Entries with a checkbox can be fixed from here: wrong and questionable Plex matches, and a library's **Prefer local metadata**
+setting, which is how release names become titles. Tick them and press **preview** to see exactly what would change; nothing
+happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
+deleted.
+
 It needs to see your media to check the disk. Mount it at the same path Radarr, Sonarr and Plex use, so a path means the same
 thing everywhere. On the **settings** page, every path in use is listed with whether this app can see it. A path counts as
 verified only when a file the other services list really exists there, and the doctor looks only inside paths you've ticked

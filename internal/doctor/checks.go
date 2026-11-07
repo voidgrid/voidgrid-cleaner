@@ -92,7 +92,7 @@ func (s *snapshot) wrongMatches() []storage.Finding {
 			return
 		}
 		out = append(out, storage.Finding{
-			Subject: it.RatingKey, Title: it.Title, Severity: problem,
+			Subject: it.RatingKey, Title: it.Title, Severity: problem, Data: matchData(lib, it, c),
 			Detail: fmt.Sprintf("Plex has this file as %q; %s says it's %q (%d).", it.Title, arrName(lib), c.title, c.year),
 		})
 	})
@@ -103,6 +103,10 @@ func (s *snapshot) wrongMatches() []storage.Finding {
 // is missing, as with a title TMDb removed.
 func idsDisagree(lib library, it plex.Item, c counterpart) bool {
 	return it.ExternalID(agentFor(lib)) != c.id && (c.imdb == "" || it.ExternalID("imdb") != c.imdb)
+}
+
+func matchData(lib library, it plex.Item, c counterpart) string {
+	return encode(fixData{RatingKey: it.RatingKey, Type: lib.section.Type, Agent: agentFor(lib), WantID: c.id, ArrTitle: c.title, ArrYear: c.year})
 }
 
 func arrName(lib library) string {
@@ -168,19 +172,22 @@ const minTitleMatch = 0.5
 
 func (s *snapshot) questionableMatches() []storage.Finding {
 	var out []storage.Finding
-	add := func(it plex.Item, severity, why string) {
-		out = append(out, storage.Finding{Subject: it.RatingKey, Title: fmt.Sprintf("%s (%d)", it.Title, it.Year), Severity: severity, Detail: why})
+	add := func(lib library, it plex.Item, c counterpart, severity, why string) {
+		out = append(out, storage.Finding{Subject: it.RatingKey, Title: fmt.Sprintf("%s (%d)", it.Title, it.Year), Severity: severity, Detail: why, Data: matchData(lib, it, c)})
 	}
 	s.forEachItem(func(lib library, it plex.Item, c counterpart, ok bool) {
 		switch {
 		case len(it.Guids) == 0 || strings.HasPrefix(it.PlexGUID, "local://"):
-			add(it, problem, "Plex has no match for this.")
+			if !ok {
+				c = counterpart{title: it.Title, year: it.Year}
+			}
+			add(lib, it, c, problem, "Plex has no match for this.")
 		case !ok:
 		case idsDisagree(lib, it, c): // a wrong match, reported as one
 		case !releaseName.MatchString(it.Title) && titleMatch(it, c) < minTitleMatch:
-			add(it, check, fmt.Sprintf("%s calls this %q.", arrName(lib), c.title))
+			add(lib, it, c, check, fmt.Sprintf("%s calls this %q.", arrName(lib), c.title))
 		case c.year != 0 && it.Year != 0 && (it.Year-c.year > 1 || c.year-it.Year > 1):
-			add(it, check, fmt.Sprintf("Plex says %d; %s says %d.", it.Year, arrName(lib), c.year))
+			add(lib, it, c, check, fmt.Sprintf("Plex says %d; %s says %d.", it.Year, arrName(lib), c.year))
 		}
 	})
 	return out
@@ -193,7 +200,7 @@ func (s *snapshot) releaseTitles() []storage.Finding {
 			if releaseName.MatchString(it.Title) {
 				out = append(out, storage.Finding{
 					Subject: it.RatingKey, Title: it.Title, Severity: check,
-					Detail: "This title looks like a release name, likely a tag inside the file.",
+					Detail: "This title looks like a release name, likely a tag inside the file. Fix them all at once with the library's prefers local metadata entry under settings.",
 				})
 			}
 		}
@@ -373,7 +380,8 @@ func (s *snapshot) settings() []storage.Finding {
 	for _, lib := range s.libraries {
 		if lib.local {
 			out = append(out, storage.Finding{
-				Subject: "plex:local:" + lib.section.Key, Title: "plex: " + lib.section.Title + " prefers local metadata", Severity: check,
+				Subject: localPrefix + lib.section.Key, Title: "plex: " + lib.section.Title + " prefers local metadata", Severity: check,
+				Data:   encode(fixData{Section: lib.section.Key, Library: lib.section.Title}),
 				Detail: "Tags inside files win over Plex's data, which is how release names become titles. Off by default.",
 			})
 		}

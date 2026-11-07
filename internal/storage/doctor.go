@@ -17,6 +17,7 @@ type Finding struct {
 	Severity            string // "problem", "check" or "note"
 	State               string
 	FirstSeen, LastSeen int64
+	Data                string // JSON for the fix
 }
 
 // SaveFindings records one kind's complete result: new findings open, gone
@@ -29,11 +30,15 @@ func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error
 			return err
 		}
 		for _, f := range fs {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO findings (kind, subject, title, detail, severity, first_seen, last_seen)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT (kind, subject) DO UPDATE SET title = excluded.title, detail = excluded.detail, severity = excluded.severity,
+			data := f.Data
+			if data == "" {
+				data = "{}"
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO findings (kind, subject, title, detail, severity, first_seen, last_seen, data)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT (kind, subject) DO UPDATE SET title = excluded.title, detail = excluded.detail, severity = excluded.severity, data = excluded.data,
 					last_seen = excluded.last_seen, state = CASE state WHEN 'resolved' THEN 'open' ELSE state END`,
-				kind, f.Subject, f.Title, f.Detail, f.Severity, now, now); err != nil {
+				kind, f.Subject, f.Title, f.Detail, f.Severity, now, now, data); err != nil {
 				return err
 			}
 		}
@@ -43,7 +48,7 @@ func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error
 
 // Findings lists findings in a state, worst first within each kind.
 func (db *DB) Findings(ctx context.Context, state string) ([]Finding, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen FROM findings
+	rows, err := db.QueryContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data FROM findings
 		WHERE state = ? ORDER BY kind, title COLLATE NOCASE`, state)
 	if err != nil {
 		return nil, err
@@ -52,7 +57,7 @@ func (db *DB) Findings(ctx context.Context, state string) ([]Finding, error) {
 	var out []Finding
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen); err != nil {
+		if err := rows.Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -287,4 +292,89 @@ func (db *DB) PruneAudit(ctx context.Context, now time.Time) error {
 			return err
 		}
 	}
+}
+
+// Finding returns one finding; found is false if there's no such ID.
+func (db *DB) Finding(ctx context.Context, id int64) (f Finding, found bool, err error) {
+	err = db.QueryRowContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data FROM findings WHERE id = ?`, id).
+		Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return f, false, nil
+	}
+	return f, err == nil, err
+}
+
+// FixJob is a fix an admin approved.
+type FixJob struct {
+	ID, FindingID                     int64
+	Title, Choice, Who, State, Detail string
+	CreatedAt, FinishedAt             int64
+}
+
+const fixCols = `j.id, j.finding_id, f.title, j.choice, j.who, j.state, j.detail, j.created_at, j.finished_at`
+
+func scanFix(sc interface{ Scan(...any) error }) (FixJob, error) {
+	var j FixJob
+	err := sc.Scan(&j.ID, &j.FindingID, &j.Title, &j.Choice, &j.Who, &j.State, &j.Detail, &j.CreatedAt, &j.FinishedAt)
+	return j, err
+}
+
+// QueueFix adds a fix; false means that finding already has one waiting.
+func (db *DB) QueueFix(ctx context.Context, findingID int64, choice, who string) (bool, error) {
+	return changed(db.ExecContext(ctx, `INSERT INTO fix_jobs (finding_id, choice, who, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		findingID, choice, who, time.Now().Unix()))
+}
+
+// ClaimFix moves the oldest queued fix to running.
+func (db *DB) ClaimFix(ctx context.Context) (j FixJob, found bool, err error) {
+	var id int64
+	err = db.QueryRowContext(ctx, `UPDATE fix_jobs SET state = 'running'
+		WHERE id = (SELECT id FROM fix_jobs WHERE state = 'queued' ORDER BY id LIMIT 1) RETURNING id`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return j, false, nil
+	}
+	if err != nil {
+		return j, false, err
+	}
+	j, err = scanFix(db.QueryRowContext(ctx, `SELECT `+fixCols+` FROM fix_jobs j JOIN findings f ON f.id = j.finding_id WHERE j.id = ?`, id))
+	return j, err == nil, err
+}
+
+// FinishFix records how a fix ended.
+func (db *DB) FinishFix(ctx context.Context, id int64, state, detail string) error {
+	_, err := db.ExecContext(ctx, `UPDATE fix_jobs SET state = ?, detail = ?, finished_at = ? WHERE id = ?`, state, detail, time.Now().Unix(), id)
+	return err
+}
+
+// FailInterruptedFixes ends fixes a restart cut off. They don't resume: a
+// half-applied fix needs a person to look at the finding again.
+func (db *DB) FailInterruptedFixes(ctx context.Context) error {
+	_, err := db.ExecContext(ctx, `UPDATE fix_jobs SET state = 'failed', detail = 'interrupted by a restart', finished_at = ? WHERE state = 'running'`, time.Now().Unix())
+	return err
+}
+
+// RecentFixes lists the latest fixes, newest first.
+func (db *DB) RecentFixes(ctx context.Context, limit int) ([]FixJob, error) {
+	rows, err := db.QueryContext(ctx, `SELECT `+fixCols+` FROM fix_jobs j JOIN findings f ON f.id = j.finding_id ORDER BY j.id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []FixJob
+	for rows.Next() {
+		j, err := scanFix(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// HasActiveDeletion reports whether an item, or an episode of it, is on its way out.
+func (db *DB) HasActiveDeletion(ctx context.Context, ratingKey string) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM deletions WHERE (rating_key = ? OR parent_key = ?) AND state IN (?, ?, ?)`,
+		ratingKey, ratingKey, DeletionScheduled, DeletionNotified, DeletionExecuting).Scan(&n)
+	return n > 0, err
 }

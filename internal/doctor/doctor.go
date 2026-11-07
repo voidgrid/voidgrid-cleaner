@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
@@ -97,6 +98,11 @@ type (
 		Items(context.Context, string) ([]plex.Item, error)
 		ShowPath(context.Context, string) (string, error)
 		PreferLocalMetadata(context.Context, string) (bool, error)
+		Item(context.Context, string) (plex.Item, error)
+		Matches(ctx context.Context, ratingKey, title string, year int, agent string) ([]plex.Match, error)
+		Match(ctx context.Context, ratingKey, guid, name string) error
+		SetPreferLocalMetadata(ctx context.Context, sectionKey string, on bool) error
+		RefreshMetadata(context.Context, string) error
 	}
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)
@@ -110,6 +116,8 @@ type Doctor struct {
 	Sonarr SonarrAPI
 	Plex   PlexAPI
 	Seerr  SeerrAPI
+	// FixWait is the gap between checks that Plex took a match.
+	FixWait time.Duration
 
 	mu sync.Mutex
 }

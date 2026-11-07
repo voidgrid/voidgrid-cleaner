@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
@@ -185,6 +186,66 @@ func (s *Server) PreferLocalMetadata(ctx context.Context, sectionKey string) (bo
 		}
 	}
 	return false, nil
+}
+
+// Match is something Plex could match an item to.
+type Match struct {
+	GUID string `json:"guid"`
+	Name string `json:"name"`
+	Year int    `json:"year"`
+}
+
+// Matches searches for what an item could be. title may be an ID such as
+// "tmdb-105"; year 0 leaves the year out.
+func (s *Server) Matches(ctx context.Context, ratingKey, title string, year int, agent string) ([]Match, error) {
+	q := url.Values{"manual": {"1"}, "title": {title}, "agent": {agent}}
+	if year != 0 {
+		q.Set("year", strconv.Itoa(year))
+	}
+	var r struct {
+		MediaContainer struct {
+			SearchResult []Match `json:"SearchResult"`
+		} `json:"MediaContainer"`
+	}
+	err := s.do(ctx, http.MethodGet, "/library/metadata/"+url.PathEscape(ratingKey)+"/matches?"+q.Encode(), &r)
+	return r.MediaContainer.SearchResult, err
+}
+
+// Match rematches an item. Its file and plays stay as they are.
+func (s *Server) Match(ctx context.Context, ratingKey, guid, name string) error {
+	q := url.Values{"guid": {guid}, "name": {name}}
+	return s.do(ctx, http.MethodPut, "/library/metadata/"+url.PathEscape(ratingKey)+"/match?"+q.Encode(), nil)
+}
+
+// Item reads one item.
+func (s *Server) Item(ctx context.Context, ratingKey string) (Item, error) {
+	var r struct {
+		MediaContainer struct {
+			Metadata []Item `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+	if err := s.do(ctx, http.MethodGet, "/library/metadata/"+url.PathEscape(ratingKey), &r); err != nil {
+		return Item{}, err
+	}
+	if len(r.MediaContainer.Metadata) == 0 {
+		return Item{}, fmt.Errorf("plex: no item %s", ratingKey)
+	}
+	return r.MediaContainer.Metadata[0], nil
+}
+
+// SetPreferLocalMetadata changes that library setting.
+func (s *Server) SetPreferLocalMetadata(ctx context.Context, sectionKey string, on bool) error {
+	v := "0"
+	if on {
+		v = "1"
+	}
+	return s.do(ctx, http.MethodPut, "/library/sections/"+url.PathEscape(sectionKey)+"/prefs?respectTags="+v, nil)
+}
+
+// RefreshMetadata re-reads all of a library's metadata. Plex does it in the
+// background; this returns once it's started.
+func (s *Server) RefreshMetadata(ctx context.Context, sectionKey string) error {
+	return s.do(ctx, http.MethodGet, "/library/sections/"+url.PathEscape(sectionKey)+"/refresh?force=1", nil)
 }
 
 // Sections lists the libraries.
