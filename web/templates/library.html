@@ -14,6 +14,7 @@
         <option value="title"{{if eq .Filter.Sort "title"}} selected{{end}}>a-z</option>
         <option value="newest"{{if eq .Filter.Sort "newest"}} selected{{end}}>newest added</option>
         <option value="oldest"{{if eq .Filter.Sort "oldest"}} selected{{end}}>oldest added</option>
+        <option value="watched"{{if eq .Filter.Sort "watched"}} selected{{end}}>oldest watched</option>
     </select>
     <button type="submit">go</button>
     {{$active := or .Filter.Status .Filter.AddedDays .Filter.UnwatchedDays .Filter.RequesterWatched}}

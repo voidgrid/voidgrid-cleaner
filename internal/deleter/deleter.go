@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ type (
 		MovieQueue(context.Context, int64) ([]arr.QueueItem, error)
 		RemoveFromQueue(context.Context, int64) error
 		DeleteMovie(context.Context, int64) error
+		DiskSpace(context.Context) ([]arr.DiskSpace, error)
 	}
 	SonarrAPI interface {
 		Series(context.Context) ([]arr.Series, error)
@@ -43,6 +45,10 @@ type (
 		SeriesQueue(context.Context, int64, []int64) ([]arr.QueueItem, error)
 		RemoveFromQueue(context.Context, int64) error
 		DeleteSeries(context.Context, int64) error
+		DiskSpace(context.Context) ([]arr.DiskSpace, error)
+		Episodes(context.Context, int64) ([]arr.Episode, error)
+		UnmonitorEpisodes(context.Context, []int64) error
+		DeleteEpisodeFile(context.Context, int64) error
 	}
 	PlexAPI interface {
 		RefreshSection(context.Context, string) error
@@ -57,6 +63,8 @@ type (
 	}
 	Notifier interface {
 		Notify(ctx context.Context, text string, deletionID int64) error
+		Announce(ctx context.Context, text, ratingKey string) error
+		Alert(ctx context.Context, text, userID string) error
 	}
 )
 
@@ -74,6 +82,7 @@ type Worker struct {
 	Now      func() time.Time
 
 	notifyAfter time.Time
+	spaceAfter  time.Time
 }
 
 // Loop ticks until ctx ends.
@@ -93,8 +102,18 @@ func (w *Worker) Loop(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Tick sends due notifications and runs everything that's due.
+// Tick checks disk space and watched episodes, sends what's waiting for
+// Discord and runs everything that's due.
 func (w *Worker) Tick(ctx context.Context) {
+	if !w.Now().Before(w.spaceAfter) {
+		w.spaceAfter = w.Now().Add(spaceCheck)
+		if err := w.checkSpace(ctx); err != nil {
+			log.Printf("deleter: space check: %v", err)
+		}
+		if err := w.checkEphemeral(ctx); err != nil {
+			log.Printf("deleter: ephemeral check: %v", err)
+		}
+	}
 	window, err := w.DB.DeleteWindow(ctx)
 	if err != nil {
 		log.Printf("deleter: delete window: %v", err) // not knowing it means not deleting
@@ -102,6 +121,9 @@ func (w *Worker) Tick(ctx context.Context) {
 	}
 	if err := w.notify(ctx, window); err != nil {
 		log.Printf("deleter: notify: %v", err)
+	}
+	if err := w.announce(ctx); err != nil {
+		log.Printf("deleter: announce: %v", err)
 	}
 	// Times are already set to fall in the window; this covers a window
 	// changed after they were set.
@@ -129,10 +151,23 @@ func (w *Worker) notify(ctx context.Context, window storage.DeleteWindow) error 
 	if err != nil || len(ds) == 0 {
 		return err
 	}
+	shows := map[string]bool{}
 	for _, d := range ds {
 		after := window.Next(w.Now().Add(storage.DeletionDelay))
 		// <t:...> shows in each reader's own time zone.
 		text := fmt.Sprintf("**%s** will be deleted <t:%d:f> unless someone presses Keep.", d.Title, after.Unix())
+		batch := []storage.Deletion{d}
+		// Ephemeral episodes go out as one notice for the show, never one each.
+		if d.Kind == storage.KindEphemeral {
+			if shows[d.ParentKey] {
+				continue
+			}
+			shows[d.ParentKey] = true
+			if batch, err = w.DB.UnnotifiedEpisodes(ctx, d.ParentKey); err != nil {
+				return err
+			}
+			text = fmt.Sprintf("**%s**: watched episodes (%d) will be deleted <t:%d:f> unless someone presses Keep.", d.Title, len(batch), after.Unix())
+		}
 		if d.DryRun || w.DryRun {
 			text += " (dry run: nothing will really be deleted)"
 		}
@@ -142,8 +177,10 @@ func (w *Worker) notify(ctx context.Context, window storage.DeleteWindow) error 
 			w.notifyAfter = w.Now().Add(notifyRetry)
 			return err
 		}
-		if err := w.DB.MarkNotified(ctx, d.ID, after); err != nil {
-			return err
+		for _, b := range batch {
+			if err := w.DB.MarkNotified(ctx, b.ID, after); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -185,7 +222,11 @@ func (w *Worker) run(ctx context.Context, d storage.Deletion) {
 }
 
 func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, steps *[]string) error {
-	m, seerrMedia, found, err := w.DB.DeletionTarget(ctx, d.RatingKey)
+	target := d.RatingKey
+	if d.ParentKey != "" {
+		target = d.ParentKey
+	}
+	m, seerrMedia, found, err := w.DB.DeletionTarget(ctx, target)
 	if err != nil {
 		return err
 	}
@@ -197,7 +238,7 @@ func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, step
 		return errBusy{"couldn't check what's playing: " + err.Error()}
 	}
 	for _, s := range sessions {
-		if strconv.FormatInt(int64(s.RatingKey), 10) == m.RatingKey || strconv.FormatInt(int64(s.GrandparentRatingKey), 10) == m.RatingKey {
+		if strconv.FormatInt(int64(s.RatingKey), 10) == d.RatingKey || strconv.FormatInt(int64(s.GrandparentRatingKey), 10) == d.RatingKey {
 			return errBusy{"being watched"}
 		}
 	}
@@ -229,7 +270,20 @@ func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, step
 		return errors.New("was in Radarr/Sonarr at the last sync but isn't now; left alone")
 	}
 
+	// An episode leaves the series and its Seerr request alone, so later ones
+	// keep coming; only Sonarr can stop it being grabbed again.
+	if d.ParentKey != "" {
+		if !arrID.Valid {
+			return errors.New("not in Sonarr, so nothing can stop it coming back; left alone")
+		}
+		if err := w.deleteEpisode(ctx, arrID.Int64, d, do); err != nil {
+			return err
+		}
+		seerrMedia = nil
+	}
+
 	switch {
+	case d.ParentKey != "":
 	case !arrID.Valid:
 		if err := do("delete item and files in plex", func() error { return w.Plex.DeleteItem(ctx, m.RatingKey) }); err != nil {
 			return err
@@ -310,6 +364,35 @@ func (w *Worker) deleteMovie(ctx context.Context, id int64, do stepFn) error {
 		}
 	}
 	return do("delete movie and files in radarr, with import exclusion", func() error { return w.Radarr.DeleteMovie(ctx, id) })
+}
+
+// deleteEpisode is deleteMovie for one episode; the same order rule applies.
+func (w *Worker) deleteEpisode(ctx context.Context, seriesID int64, d storage.Deletion, do stepFn) error {
+	eps, err := w.Sonarr.Episodes(ctx, seriesID)
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(eps, func(e arr.Episode) bool { return e.SeasonNumber == d.Season && e.EpisodeNumber == d.Episode })
+	if i < 0 {
+		return errors.New("episode not in sonarr; left alone")
+	}
+	ep := eps[i]
+	if err := do("unmonitor episode in sonarr", func() error { return w.Sonarr.UnmonitorEpisodes(ctx, []int64{ep.ID}) }); err != nil {
+		return err
+	}
+	queue, err := w.Sonarr.SeriesQueue(ctx, seriesID, []int64{ep.ID})
+	if err != nil {
+		return err
+	}
+	for _, q := range queue {
+		if err := do("remove "+q.Title+" from sonarr queue", func() error { return w.Sonarr.RemoveFromQueue(ctx, q.ID) }); err != nil {
+			return err
+		}
+	}
+	if ep.EpisodeFileID == 0 {
+		return nil // already gone; it's unmonitored now, which is what matters
+	}
+	return do(fmt.Sprintf("delete S%02dE%02d file in sonarr", d.Season, d.Episode), func() error { return w.Sonarr.DeleteEpisodeFile(ctx, ep.EpisodeFileID) })
 }
 
 // deleteSeries is deleteMovie for Sonarr; the same order rule applies.

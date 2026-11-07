@@ -1,5 +1,5 @@
-// Package discord posts deletion notices with a Keep button and checks the
-// signed requests Discord sends when someone presses it.
+// Package discord posts notices with Keep and Add me buttons and checks the
+// signed requests Discord sends when someone presses one.
 package discord
 
 import (
@@ -19,7 +19,10 @@ import (
 // a replay can only repeat a keep, which is harmless.
 const maxSkew = 5 * time.Minute
 
-const keepPrefix = "keep:"
+const (
+	keepPrefix = "keep:"
+	joinPrefix = "join:"
+)
 
 // Client posts to one channel as the bot.
 type Client struct {
@@ -32,22 +35,70 @@ type Client struct {
 // Notify posts text with a Keep button for the deletion. It returns nil only
 // once Discord has replied with the created message.
 func (c *Client) Notify(ctx context.Context, text string, deletionID int64) error {
-	body := map[string]any{
+	return c.post(ctx, map[string]any{
 		"content":          text,
-		"allowed_mentions": map[string]any{"parse": []string{}}, // a title can't ping anyone
-		"components": []any{map[string]any{"type": 1, "components": []any{map[string]any{
-			"type": 2, "style": 3, "label": "Keep", "custom_id": keepPrefix + strconv.FormatInt(deletionID, 10),
-		}}}},
+		"allowed_mentions": noMentions,
+		"components":       button(3, "Keep", keepPrefix+strconv.FormatInt(deletionID, 10)),
+	})
+}
+
+// Announce posts text with an Add me button for the show.
+func (c *Client) Announce(ctx context.Context, text, ratingKey string) error {
+	return c.post(ctx, map[string]any{
+		"content":          text,
+		"allowed_mentions": noMentions,
+		"components":       button(1, "Add me", joinPrefix+ratingKey),
+	})
+}
+
+// Alert posts text tagging one user, or nobody if userID is empty. Only that
+// user can be pinged, whatever the text says.
+func (c *Client) Alert(ctx context.Context, text, userID string) error {
+	if userID == "" {
+		return c.post(ctx, map[string]any{"content": text, "allowed_mentions": noMentions})
 	}
+	return c.post(ctx, map[string]any{
+		"content":          "<@" + userID + "> " + text,
+		"allowed_mentions": map[string]any{"users": []string{userID}},
+	})
+}
+
+// GuildOwner returns the owner of the server the channel is in.
+func (c *Client) GuildOwner(ctx context.Context) (string, error) {
+	var ch struct {
+		GuildID string `json:"guild_id"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/channels/"+c.Channel, nil, &ch); err != nil {
+		return "", err
+	}
+	var g struct {
+		OwnerID string `json:"owner_id"`
+	}
+	err := c.do(ctx, http.MethodGet, "/guilds/"+ch.GuildID, nil, &g)
+	return g.OwnerID, err
+}
+
+// noMentions stops a title or name pinging anyone.
+var noMentions = map[string]any{"parse": []string{}}
+
+func button(style int, label, customID string) []any {
+	return []any{map[string]any{"type": 1, "components": []any{map[string]any{
+		"type": 2, "style": style, "label": label, "custom_id": customID,
+	}}}}
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bot "+c.Token)
 	hdr.Set("User-Agent", "DiscordBot (https://github.com/voidgrid/voidgrid-cleaner, 1)")
+	return httpjson.Do(ctx, c.HTTP, "discord", method, strings.TrimRight(c.BaseURL, "/")+path, hdr, body, out)
+}
+
+func (c *Client) post(ctx context.Context, body map[string]any) error {
 	var out struct {
 		ID string `json:"id"`
 	}
-	err := httpjson.Do(ctx, c.HTTP, "discord", http.MethodPost,
-		strings.TrimRight(c.BaseURL, "/")+"/channels/"+c.Channel+"/messages", hdr, body, &out)
-	if err != nil {
+	if err := c.do(ctx, http.MethodPost, "/channels/"+c.Channel+"/messages", body, &out); err != nil {
 		return err
 	}
 	if out.ID == "" {
@@ -72,6 +123,11 @@ func Verify(key ed25519.PublicKey, sigHex, timestamp string, body []byte, now ti
 	}
 	d := now.Sub(time.Unix(ts, 0))
 	return d < maxSkew && d > -maxSkew
+}
+
+// ParseJoin returns the show an Add me button belongs to.
+func ParseJoin(customID string) (string, bool) {
+	return strings.CutPrefix(customID, joinPrefix)
 }
 
 // ParseKeep returns the deletion a Keep button belongs to.

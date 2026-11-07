@@ -28,6 +28,9 @@ type fake struct {
 	activity  error
 	notifyErr error
 	seerrErr  error
+	disks     []arr.DiskSpace
+	episodes  []arr.Episode
+	posts     []string
 }
 
 func (f *fake) rec(format string, a ...any) error {
@@ -43,6 +46,27 @@ type (
 	radarr struct{ *fake }
 	sonarr struct{ *fake }
 )
+
+func (f sonarr) Episodes(context.Context, int64) ([]arr.Episode, error) { return f.episodes, nil }
+func (f sonarr) UnmonitorEpisodes(_ context.Context, ids []int64) error {
+	return f.rec("sonarr unmonitor episode %d", ids[0])
+}
+
+func (f sonarr) DeleteEpisodeFile(_ context.Context, id int64) error {
+	return f.rec("sonarr delete file %d", id)
+}
+
+func (f *fake) Announce(_ context.Context, text, key string) error {
+	f.posts = append(f.posts, text)
+	return f.rec("announce %s", key)
+}
+
+func (f *fake) Alert(_ context.Context, text, user string) error {
+	f.posts = append(f.posts, text)
+	return f.rec("alert %s", user)
+}
+
+func (f *fake) DiskSpace(context.Context) ([]arr.DiskSpace, error) { return f.disks, nil }
 
 func (f radarr) Movies(context.Context) ([]arr.Movie, error) { return f.movies, nil }
 func (f radarr) UnmonitorMovie(_ context.Context, id int64) error {
@@ -85,8 +109,9 @@ func (f *fake) DeleteMedia(_ context.Context, id int64) error {
 
 func (f *fake) Activity(context.Context) ([]tautulli.Session, error) { return f.sessions, f.activity }
 
-func (f *fake) Notify(context.Context, string, int64) error {
+func (f *fake) Notify(_ context.Context, text string, _ int64) error {
 	f.calls = append(f.calls, "notify")
+	f.posts = append(f.posts, text)
 	return f.notifyErr
 }
 
@@ -120,6 +145,9 @@ func setup(t *testing.T) (*Worker, *fake, *time.Time) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetDeleteWindow(ctx, storage.DeleteWindow{}); err != nil { // tests run at any hour
+		t.Fatal(err)
+	}
 	f := &fake{
 		movies: []arr.Movie{{ID: 7, TmdbID: 100}},
 		series: []arr.Series{{ID: 8, TvdbID: 200}},
@@ -134,7 +162,7 @@ func setup(t *testing.T) (*Worker, *fake, *time.Time) {
 
 func schedule(t *testing.T, w *Worker, key string, dry bool) {
 	t.Helper()
-	if ok, err := w.DB.ScheduleDeletion(context.Background(), key, 1, dry); err != nil || !ok {
+	if ok, err := w.DB.ScheduleDeletion(context.Background(), key, 1, dry, storage.KindManual); err != nil || !ok {
 		t.Fatalf("schedule %s: %v %v", key, ok, err)
 	}
 }
@@ -401,16 +429,16 @@ func TestScheduleRefusals(t *testing.T) {
 	w, _, _ := setup(t)
 	ctx := context.Background()
 	schedule(t, w, "10", false)
-	if ok, _ := w.DB.ScheduleDeletion(ctx, "10", 1, false); ok {
+	if ok, _ := w.DB.ScheduleDeletion(ctx, "10", 1, false, storage.KindManual); ok {
 		t.Fatal("scheduled twice")
 	}
-	if ok, _ := w.DB.ScheduleDeletion(ctx, "99", 1, false); ok {
+	if ok, _ := w.DB.ScheduleDeletion(ctx, "99", 1, false, storage.KindManual); ok {
 		t.Fatal("scheduled an unknown item")
 	}
 	if err := w.DB.SetItemStatus(ctx, "11", storage.StatusKeep, 1); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := w.DB.ScheduleDeletion(ctx, "11", 1, false); ok {
+	if ok, _ := w.DB.ScheduleDeletion(ctx, "11", 1, false, storage.KindManual); ok {
 		t.Fatal("scheduled a keep item")
 	}
 }

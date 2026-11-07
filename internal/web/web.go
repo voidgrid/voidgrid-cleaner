@@ -71,12 +71,17 @@ type page struct {
 	Users     []storage.User
 	Status    *statusPage
 	Settings  *settingsPage
+	Ephemeral []storage.EphemeralShow
 }
 
 type settingsPage struct {
-	Window storage.DeleteWindow
-	Zone   string
-	Saved  bool
+	Window       storage.DeleteWindow
+	Zone         string
+	SpaceLimit   string
+	DefaultSpace int
+	DefaultWin   storage.DeleteWindow
+	AdminDiscord string
+	Saved        bool
 }
 
 type statusPage struct {
@@ -136,7 +141,7 @@ func init() {
 		},
 		"gb": func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -176,6 +181,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/library", s.library)
 		r.Get("/library/{key}", s.library)
 		r.Get("/poster/{ratingKey}", s.poster)
+		r.Get("/ephemeral", s.ephemeral)
+		r.Post("/ephemeral/{ratingKey}/join", s.joinEphemeral)
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)
 			r.Get("/sync", s.syncStatus)
@@ -325,7 +332,8 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, isKeep := discord.ParseKeep(in.Data.CustomID)
-	if in.Type != component || !isKeep || in.ChannelID != s.DiscordChannel || in.Member.User.ID == "" {
+	show, isJoin := discord.ParseJoin(in.Data.CustomID)
+	if in.Type != component || (!isKeep && !isJoin) || in.ChannelID != s.DiscordChannel || in.Member.User.ID == "" {
 		private("That can't be done here.")
 		return
 	}
@@ -334,6 +342,21 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = n
 		}
+	}
+	if isJoin {
+		title, result, err := s.DB.JoinFromDiscord(r.Context(), show, in.Member.User.ID, name)
+		switch {
+		case err != nil:
+			log.Printf("web: discord join: %v", err)
+			private("Something went wrong, so you weren't added. Tell an admin.")
+		case result == storage.JoinAdded:
+			private("You're on **" + title + "**: episodes now wait until you've watched them too.")
+		case result == storage.JoinPending:
+			private("Your Discord account isn't linked yet, so an admin has been asked. You'll be added to **" + title + "** when that's done.")
+		default:
+			private("That show isn't ephemeral any more.")
+		}
+		return
 	}
 	title, kept, err := s.DB.KeepFromDiscord(r.Context(), id, in.Member.User.ID, name)
 	if err != nil {
@@ -522,6 +545,29 @@ func backToCard(w http.ResponseWriter, r *http.Request, section, key string) {
 	http.Redirect(w, r, dest.String(), http.StatusSeeOther)
 }
 
+// ephemeral lists ephemeral shows so anyone can add themselves, including
+// people who can't see a show in their library because they didn't request it.
+func (s *Server) ephemeral(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	shows, err := s.DB.EphemeralShows(r.Context(), u)
+	if err != nil {
+		log.Printf("web: ephemeral: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "ephemeral", page{User: &u, Ephemeral: shows})
+}
+
+func (s *Server) joinEphemeral(w http.ResponseWriter, r *http.Request) {
+	// False means it stopped being ephemeral; the list shows that.
+	if _, err := s.DB.AddWatcher(r.Context(), chi.URLParam(r, "ratingKey"), userFrom(r.Context()).SeerrID); err != nil {
+		log.Printf("web: join ephemeral: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/ephemeral", http.StatusSeeOther)
+}
+
 // recentDeletions is how many finished deletions the status screen shows.
 const recentDeletions = 20
 
@@ -539,7 +585,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "home", page{User: &u, Status: &statusPage{DryRun: s.DryRun, Active: active, Recent: recent}})
+	render(w, http.StatusOK, "home", page{User: &u, Status: &statusPage{DryRun: s.DryRun, Active: storage.ByShow(active), Recent: storage.ByShow(recent)}})
 }
 
 func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
@@ -554,7 +600,7 @@ func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	ok, err := s.DB.ScheduleDeletion(r.Context(), key, userFrom(r.Context()).SeerrID, s.DryRun)
+	ok, err := s.DB.ScheduleDeletion(r.Context(), key, userFrom(r.Context()).SeerrID, s.DryRun, storage.KindManual)
 	if err != nil {
 		log.Printf("web: schedule deletion: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -695,21 +741,53 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	limit, err := s.DB.SpaceLimit(r.Context())
+	if err != nil {
+		log.Printf("web: space limit: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	admin, err := s.DB.AdminDiscord(r.Context())
+	if err != nil {
+		log.Printf("web: admin discord: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	render(w, http.StatusOK, "settings", page{User: &u, Settings: &settingsPage{
-		Window: win, Zone: time.Now().Format("MST"), Saved: r.URL.Query().Get("saved") == "1",
+		Window: win, Zone: time.Now().Format("MST"), SpaceLimit: strconv.Itoa(limit), DefaultSpace: storage.DefaultSpaceLimit,
+		DefaultWin: storage.DefaultWindow, AdminDiscord: admin, Saved: r.URL.Query().Get("saved") == "1",
 	}})
 }
 
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	win := storage.DeleteWindow{Start: r.PostFormValue("window_start"), End: r.PostFormValue("window_end")}
-	if err := win.Validate(); err != nil {
+	spaceForm := r.PostFormValue("space_limit")
+	limit, err := storage.ParseSpaceLimit(spaceForm)
+	if err == nil {
+		err = win.Validate()
+	}
+	admin := strings.TrimSpace(r.PostFormValue("admin_discord"))
+	if err == nil {
+		err = storage.ValidAdminDiscord(admin)
+	}
+	if err != nil {
 		u := userFrom(r.Context())
 		// A 200: a typo here shouldn't count towards a proxy ban.
-		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{Window: win, Zone: time.Now().Format("MST")}})
+		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{
+			Window: win, Zone: time.Now().Format("MST"), SpaceLimit: spaceForm, DefaultSpace: storage.DefaultSpaceLimit,
+			DefaultWin: storage.DefaultWindow, AdminDiscord: admin,
+		}})
 		return
 	}
-	if err := s.DB.SetDeleteWindow(r.Context(), win); err != nil {
+	err = s.DB.SetDeleteWindow(r.Context(), win)
+	if err == nil {
+		err = s.DB.SetSpaceLimit(r.Context(), limit)
+	}
+	if err == nil {
+		err = s.DB.SetAdminDiscord(r.Context(), admin)
+	}
+	if err != nil {
 		log.Printf("web: save settings: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

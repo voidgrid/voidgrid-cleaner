@@ -91,7 +91,14 @@ func run() error {
 		Now:      time.Now,
 	}
 	if cfg.DiscordBotToken != "" {
-		worker.Notify = &discord.Client{BaseURL: "https://discord.com/api/v10", Token: cfg.DiscordBotToken, Channel: cfg.DiscordChannel, HTTP: hc}
+		bot := &discord.Client{BaseURL: "https://discord.com/api/v10", Token: cfg.DiscordBotToken, Channel: cfg.DiscordChannel, HTTP: hc}
+		worker.Notify = bot
+		// The server owner is who admin notices tag until someone picks another.
+		if owner, err := bot.GuildOwner(ctx); err != nil {
+			log.Printf("discord: server owner: %v", err)
+		} else if err := db.DefaultAdminDiscord(ctx, owner); err != nil {
+			log.Printf("discord: server owner: %v", err)
+		}
 	}
 	s := &web.Server{
 		DryRun:         worker.DryRun,

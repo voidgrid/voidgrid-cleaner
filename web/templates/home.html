@@ -1,3 +1,4 @@
+{{define "episodes"}}{{if .Episodes}} <span class="muted">({{.Episodes}} episode{{if ne .Episodes 1}}s{{end}})</span>{{end}}{{end}}
 {{define "content"}}
 <h1>status</h1>
 <div data-live>
@@ -5,15 +6,16 @@
 {{if .DryRun}}<p class="muted">dry run: nothing is really deleted.</p>{{end}}
 {{if .Active}}
 <table>
-    <thead><tr><th>scheduled for deletion</th><th>deletes</th>{{if $.User.IsAdmin}}<th><span class="visually-hidden">actions</span></th>{{end}}</tr></thead>
+    <thead><tr><th>scheduled for deletion</th><th>why</th><th>deletes</th>{{if $.User.IsAdmin}}<th><span class="visually-hidden">actions</span></th>{{end}}</tr></thead>
     <tbody>
     {{range .Active}}
     <tr>
-        <td>{{.Title}}{{if .DryRun}} <span class="badge">dry run</span>{{end}}{{if .Detail}}<br><span class="muted">{{.Detail}}</span>{{end}}</td>
+        <td>{{.Title}}{{template "episodes" .}}{{if .DryRun}} <span class="badge">dry run</span>{{end}}{{if .Detail}}<br><span class="muted">{{.Detail}}</span>{{end}}</td>
+        <td>{{.Kind}}</td>
         <td>{{if eq .State "executing"}}deleting now{{else if .DeleteAfter}}{{when .DeleteAfter}}{{else}}<span class="muted">waiting for notification</span>{{end}}</td>
         {{if $.User.IsAdmin}}<td>{{if ne .State "executing"}}<div class="actions">
-            <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/keep"><button type="submit" aria-label="keep {{.Title}}">keep</button></form>
-            <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/space_based"><button type="submit" aria-label="make {{.Title}} space-based">space-based</button></form>
+            {{if not .ParentKey}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/keep"><button type="submit" aria-label="keep {{.Title}}">keep</button></form>
+            <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/space_based"><button type="submit" aria-label="make {{.Title}} space-based">space-based</button></form>{{end}}
             {{if eq .State "notified"}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/postpone"><button type="submit" aria-label="postpone {{.Title}}">postpone</button></form>{{end}}
             <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/cancel"><button type="submit" aria-label="cancel deleting {{.Title}}">cancel</button></form>
         </div>{{end}}</td>{{end}}
@@ -27,11 +29,12 @@
 {{if .Recent}}
 <h2>recent</h2>
 <table>
-    <thead><tr><th>item</th><th>result</th><th>finished</th></tr></thead>
+    <thead><tr><th>item</th><th>why</th><th>result</th><th>finished</th></tr></thead>
     <tbody>
     {{range .Recent}}
     <tr>
-        <td>{{.Title}}{{if .Detail}}<br><span class="muted">{{.Detail}}</span>{{end}}</td>
+        <td>{{.Title}}{{template "episodes" .}}{{if .Detail}}<br><span class="muted">{{.Detail}}</span>{{end}}</td>
+        <td>{{.Kind}}</td>
         <td>{{.State}}{{if .DryRun}} <span class="badge">dry run</span>{{end}}</td>
         <td>{{when .FinishedAt}}</td>
     </tr>

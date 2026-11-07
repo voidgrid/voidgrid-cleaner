@@ -182,6 +182,13 @@ func TestLibrarySearchAndSort(t *testing.T) {
 	if err := db.ReplaceRequests(ctx, []Request{{SeerrRequestID: 1, SeerrUserID: 2, RatingKey: sql.NullString{String: "2", Valid: true}}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.ReplacePlays(ctx, []Play{
+		{ReferenceID: 1, PlexUserID: 1, RatingKey: "4", ShowRatingKey: "4", Stopped: 50},
+		{ReferenceID: 2, PlexUserID: 1, RatingKey: "4", ShowRatingKey: "4", Stopped: 900},
+		{ReferenceID: 3, PlexUserID: 1, RatingKey: "1", ShowRatingKey: "1", Stopped: 600},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	admin := User{IsAdmin: true}
 	for _, c := range []struct {
 		name, search, sort string
@@ -189,6 +196,7 @@ func TestLibrarySearchAndSort(t *testing.T) {
 		want               string
 	}{
 		{"title", "", "", admin, "3 1 2 4"},
+		{"oldest watched by last play, never-watched last by date added", "", "watched", admin, "1 4 2 3"},
 		{"unknown sort is title", "", "x; DROP TABLE media", admin, "3 1 2 4"},
 		{"newest", "", "newest", admin, "4 1 3 2"},
 		{"oldest", "", "oldest", admin, "2 3 1 4"},
@@ -474,7 +482,7 @@ func TestDeleteWindowTimes(t *testing.T) {
 	}
 	db := openTest(t)
 	ctx := context.Background()
-	if w, err := db.DeleteWindow(ctx); err != nil || w != (DeleteWindow{}) {
+	if w, err := db.DeleteWindow(ctx); err != nil || w != DefaultWindow {
 		t.Fatal(w, err)
 	}
 	if err := db.SetDeleteWindow(ctx, DeleteWindow{Start: "03:00"}); err == nil {

@@ -10,6 +10,13 @@ import (
 // DeletionDelay is how long after a confirmed notification a deletion runs.
 const DeletionDelay = 24 * time.Hour
 
+// Why a deletion exists.
+const (
+	KindManual    = "manual"
+	KindSpace     = "space"
+	KindEphemeral = "ephemeral"
+)
+
 // Deletion states.
 const (
 	DeletionScheduled = "scheduled"
@@ -31,13 +38,41 @@ type Deletion struct {
 	DeleteAfter int64 // unix seconds, 0 until the notification is confirmed
 	FinishedAt  int64
 	Detail      string
+	Kind        string
+	ParentKey   string // the show, on an episode's deletion
+	Season      int
+	Episode     int
+	Episodes    int // how many a row from ByShow stands for
 }
 
-const deletionCols = `id, rating_key, title, media_type, state, dry_run, delete_after, finished_at, detail`
+// ByShow folds a show's ephemeral episodes into one row each for a screen:
+// people think of these as the show. The row carries the show's key, so
+// actions on it reach them all. Anything else passes through.
+func ByShow(ds []Deletion) []Deletion {
+	var out []Deletion
+	rows := map[[2]string]int{}
+	for _, d := range ds {
+		if d.Kind != KindEphemeral {
+			out = append(out, d)
+			continue
+		}
+		k := [2]string{d.ParentKey, d.State}
+		if i, seen := rows[k]; seen {
+			out[i].Episodes++
+			continue
+		}
+		rows[k] = len(out)
+		d.RatingKey, d.Episodes = d.ParentKey, 1
+		out = append(out, d)
+	}
+	return out
+}
+
+const deletionCols = `id, rating_key, title, media_type, state, dry_run, delete_after, finished_at, detail, kind, parent_key, season, episode`
 
 func scanDeletion(sc interface{ Scan(...any) error }) (Deletion, error) {
 	var d Deletion
-	err := sc.Scan(&d.ID, &d.RatingKey, &d.Title, &d.Type, &d.State, &d.DryRun, &d.DeleteAfter, &d.FinishedAt, &d.Detail)
+	err := sc.Scan(&d.ID, &d.RatingKey, &d.Title, &d.Type, &d.State, &d.DryRun, &d.DeleteAfter, &d.FinishedAt, &d.Detail, &d.Kind, &d.ParentKey, &d.Season, &d.Episode)
 	return d, err
 }
 
@@ -68,31 +103,76 @@ func changed(res sql.Result, err error) (bool, error) {
 
 // ScheduleDeletion queues an item. It's false if the item is unknown, set to
 // keep, or already on its way.
-func (db *DB) ScheduleDeletion(ctx context.Context, ratingKey string, by int64, dryRun bool) (bool, error) {
+func (db *DB) ScheduleDeletion(ctx context.Context, ratingKey string, by int64, dryRun bool, kind string) (bool, error) {
 	return changed(db.ExecContext(ctx, `
-		INSERT INTO deletions (rating_key, title, media_type, dry_run, scheduled_by, created_at)
-		SELECT rating_key, title, type, ?, ?, ? FROM media m
+		INSERT INTO deletions (rating_key, title, media_type, kind, dry_run, scheduled_by, created_at)
+		SELECT rating_key, title, type, ?, ?, ?, ? FROM media m
 		WHERE m.rating_key = ? AND NOT EXISTS (
 			SELECT 1 FROM item_status st WHERE st.rating_key = m.rating_key AND st.status = ?)
-		ON CONFLICT DO NOTHING`, dryRun, by, time.Now().Unix(), ratingKey, StatusKeep))
+		ON CONFLICT DO NOTHING`, kind, dryRun, by, time.Now().Unix(), ratingKey, StatusKeep))
+}
+
+// SpaceItem is an item the free-space check can act on. Active means a
+// deletion is already under way.
+type SpaceItem struct {
+	Media
+	Active bool
+}
+
+// SpaceItems lists space-based items in the order they should go, those
+// already going first. Only what Radarr or Sonarr manage counts, because only
+// they say which disk an item is on. An item whose deletion finished since it
+// was marked stays out until it's marked again: a cancel or failure isn't
+// retried on its own, and a dry run doesn't repeat. dryRun picks which runs count.
+func (db *DB) SpaceItems(ctx context.Context, dryRun bool) ([]SpaceItem, error) {
+	rows, err := db.QueryContext(ctx, `SELECT m.rating_key, m.type, m.title, m.tmdb_id, m.tvdb_id, m.size_bytes, d.id IS NOT NULL, `+lastWatched+`
+		FROM media m
+		JOIN item_status st ON st.rating_key = m.rating_key AND st.status = ?
+		JOIN sections s ON s.section_key = m.section_key AND s.ignored = 0
+		LEFT JOIN deletions d ON d.rating_key = m.rating_key AND d.state IN (?, ?, ?)
+		WHERE m.arr_id IS NOT NULL AND m.size_bytes > 0 AND NOT EXISTS (
+			SELECT 1 FROM deletions f WHERE f.rating_key = m.rating_key AND f.dry_run = ? AND f.finished_at > st.set_at)
+		ORDER BY d.id IS NULL, `+byOldestWatched,
+		StatusSpace, DeletionScheduled, DeletionNotified, DeletionExecuting, dryRun)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SpaceItem
+	for rows.Next() {
+		var it SpaceItem
+		var watched int64
+		if err := rows.Scan(&it.RatingKey, &it.Type, &it.Title, &it.TmdbID, &it.TvdbID, &it.SizeBytes, &it.Active, &watched); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
 }
 
 // CancelDeletion stops a deletion. Once executing it can't be stopped.
 func (db *DB) CancelDeletion(ctx context.Context, ratingKey string) (bool, error) {
 	return changed(db.ExecContext(ctx, `
-		UPDATE deletions SET state = ?, finished_at = ? WHERE rating_key = ? AND state IN (?, ?)`,
-		DeletionCancelled, time.Now().Unix(), ratingKey, DeletionScheduled, DeletionNotified))
+		UPDATE deletions SET state = ?, finished_at = ? WHERE (rating_key = ? OR (parent_key = ? AND kind = ?)) AND state IN (?, ?)`,
+		DeletionCancelled, time.Now().Unix(), ratingKey, ratingKey, KindEphemeral, DeletionScheduled, DeletionNotified))
 }
 
 // PostponeDeletion adds DeletionDelay to a running clock.
 func (db *DB) PostponeDeletion(ctx context.Context, ratingKey string) (bool, error) {
-	return changed(db.ExecContext(ctx, `UPDATE deletions SET delete_after = delete_after + ? WHERE rating_key = ? AND state = ?`,
-		int64(DeletionDelay/time.Second), ratingKey, DeletionNotified))
+	return changed(db.ExecContext(ctx, `UPDATE deletions SET delete_after = delete_after + ? WHERE (rating_key = ? OR (parent_key = ? AND kind = ?)) AND state = ?`,
+		int64(DeletionDelay/time.Second), ratingKey, ratingKey, KindEphemeral, DeletionNotified))
 }
 
 // UnnotifiedDeletions returns deletions still waiting for their notification.
 func (db *DB) UnnotifiedDeletions(ctx context.Context, limit int) ([]Deletion, error) {
 	return db.deletions(ctx, `SELECT `+deletionCols+` FROM deletions WHERE state = ? ORDER BY id LIMIT ?`, DeletionScheduled, limit)
+}
+
+// UnnotifiedEpisodes returns a show's ephemeral deletions still waiting for
+// their notification, which they share.
+func (db *DB) UnnotifiedEpisodes(ctx context.Context, showKey string) ([]Deletion, error) {
+	return db.deletions(ctx, `SELECT `+deletionCols+` FROM deletions WHERE state = ? AND parent_key = ? AND kind = ? ORDER BY id`,
+		DeletionScheduled, showKey, KindEphemeral)
 }
 
 // MarkNotified starts the clock on a deletion whose notification was
@@ -170,7 +250,7 @@ func (db *DB) DeletionTarget(ctx context.Context, ratingKey string) (m Media, se
 func visibleDeletions(u User, where string, args []any) (string, []any) {
 	q := `SELECT ` + deletionCols + ` FROM deletions d WHERE ` + where
 	if !u.IsAdmin {
-		q += ` AND EXISTS (SELECT 1 FROM requests r WHERE r.rating_key = d.rating_key AND r.seerr_user_id = ?)`
+		q += ` AND EXISTS (SELECT 1 FROM requests r WHERE r.rating_key IN (d.rating_key, d.parent_key) AND r.seerr_user_id = ?)`
 		args = append(args, u.SeerrID)
 	}
 	return q, args
@@ -190,15 +270,17 @@ func (db *DB) RecentDeletions(ctx context.Context, u User, limit int) ([]Deletio
 }
 
 // KeepFromDiscord stops a deletion and sets its item to keep, in one
-// transaction so the worker can't claim it in between. kept is false if the
-// deletion is no longer waiting, whatever happened to it.
+// transaction so the worker can't claim it in between. An ephemeral notice
+// covers a show's waiting episodes, so Keep stops them all, and the show stays
+// ephemeral. kept is false if the deletion is no longer waiting, whatever
+// happened to it.
 func (db *DB) KeepFromDiscord(ctx context.Context, deletionID int64, discordID, name string) (title string, kept bool, err error) {
 	err = db.tx(ctx, func(tx *sql.Tx) error {
 		now := time.Now().Unix()
-		var key string
+		var key, parent, kind string
 		err := tx.QueryRowContext(ctx, `
-			UPDATE deletions SET state = ?, finished_at = ? WHERE id = ? AND state IN (?, ?) RETURNING rating_key, title`,
-			DeletionCancelled, now, deletionID, DeletionScheduled, DeletionNotified).Scan(&key, &title)
+			UPDATE deletions SET state = ?, finished_at = ? WHERE id = ? AND state IN (?, ?) RETURNING rating_key, title, parent_key, kind`,
+			DeletionCancelled, now, deletionID, DeletionScheduled, DeletionNotified).Scan(&key, &title, &parent, &kind)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -210,6 +292,17 @@ func (db *DB) KeepFromDiscord(ctx context.Context, deletionID int64, discordID, 
 			return err
 		}
 		kept = true
+		if kind == KindEphemeral {
+			if _, err := tx.ExecContext(ctx, `UPDATE deletions SET state = ?, finished_at = ? WHERE parent_key = ? AND kind = ? AND state IN (?, ?)`,
+				DeletionCancelled, now, parent, KindEphemeral, DeletionScheduled, DeletionNotified); err != nil {
+				return err
+			}
+			title += " (these episodes)"
+			return nil
+		}
+		if parent != "" {
+			return nil
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at, set_by_discord) VALUES (?, ?, 0, ?, ?)
 			ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = 0, set_at = excluded.set_at,
 				set_by_discord = excluded.set_by_discord`, key, StatusKeep, now, discordID)

@@ -1,0 +1,22 @@
+{{define "content"}}
+<h1>ephemeral</h1>
+<div data-live>
+<p class="muted">each episode of these shows is deleted once everyone on the show has watched it. add yourself and episodes wait for you too.</p>
+{{if .Ephemeral}}
+<table>
+    <thead><tr><th>show</th><th>on it</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+    <tbody>
+    {{range .Ephemeral}}
+    <tr>
+        <td>{{.Title}}</td>
+        <td>{{if .Watchers}}{{.Watchers}}{{else}}<span class="muted">nobody</span>{{end}}</td>
+        <td>{{if .Joined}}<span class="muted">you're on it</span>{{else}}<form class="inline-form" method="post" action="/ephemeral/{{.RatingKey}}/join"><button type="submit" aria-label="add me to {{.Title}}">add me</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="muted">no shows are ephemeral.</p>
+{{end}}
+</div>
+{{end}}

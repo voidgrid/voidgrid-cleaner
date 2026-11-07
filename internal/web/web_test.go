@@ -520,10 +520,10 @@ func TestDeletionScreens(t *testing.T) {
 	seedLibrary(t, s)
 	ctx := context.Background()
 	s.DryRun = true
-	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true); err != nil || !ok {
+	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true, storage.KindManual); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
-	if ok, err := s.DB.ScheduleDeletion(ctx, "20", 1, true); err != nil || !ok {
+	if ok, err := s.DB.ScheduleDeletion(ctx, "20", 1, true, storage.KindManual); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	get(t, c, app.URL+"/login/plex")
@@ -618,7 +618,7 @@ func TestDiscordInteractions(t *testing.T) {
 	if code, b := send(priv, `{"type":1}`); code != http.StatusOK || !strings.Contains(b, `"type":1`) {
 		t.Fatalf("ping: %d %s", code, b)
 	}
-	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true); err != nil || !ok {
+	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true, storage.KindManual); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	admin := storage.User{IsAdmin: true}
@@ -751,7 +751,7 @@ func TestChangesVersion(t *testing.T) {
 	}{
 		{"status", func() error { return s.DB.SetItemStatus(ctx, "10", storage.StatusKeep, 1) }},
 		{"normal", func() error { return s.DB.SetItemStatus(ctx, "10", storage.StatusNormal, 1) }},
-		{"schedule", func() error { _, err := s.DB.ScheduleDeletion(ctx, "11", 1, true); return err }},
+		{"schedule", func() error { _, err := s.DB.ScheduleDeletion(ctx, "11", 1, true, storage.KindManual); return err }},
 		{"keep", func() error {
 			ds, _ := s.DB.ActiveDeletions(ctx, storage.User{IsAdmin: true})
 			_, _, err := s.DB.KeepFromDiscord(ctx, ds[0].ID, "900", "x")
@@ -823,6 +823,9 @@ func TestSettingsPage(t *testing.T) {
 	seedLibrary(t, s)
 	ctx := context.Background()
 	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if b := body(t, get(t, c, app.URL+"/settings")); !strings.Contains(b, `value="03:00"`) || !strings.Contains(b, `value="05:00"`) || !strings.Contains(b, `value="90"`) {
+		t.Fatalf("defaults aren't filled in: %s", b)
+	}
 	if resp := postForm(t, c, app.URL+"/settings", form); resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("save: %d", resp.StatusCode)
 	}
@@ -841,5 +844,105 @@ func TestSettingsPage(t *testing.T) {
 	}
 	if w, _ := s.DB.DeleteWindow(ctx); w != (storage.DeleteWindow{}) {
 		t.Fatalf("not cleared: %+v", w)
+	}
+	if resp := postForm(t, c, app.URL+"/settings", url.Values{"space_limit": {"85"}}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("space limit: %d", resp.StatusCode)
+	}
+	resp = postForm(t, c, app.URL+"/settings", url.Values{"space_limit": {"100"}})
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "1 to 99") {
+		t.Fatalf("bad limit: %d %s", resp.StatusCode, b)
+	}
+	if n, _ := s.DB.SpaceLimit(ctx); n != 85 {
+		t.Fatalf("limit %d, want 85", n)
+	}
+	postForm(t, c, app.URL+"/settings", url.Values{})
+	if n, _ := s.DB.SpaceLimit(ctx); n != storage.DefaultSpaceLimit {
+		t.Fatalf("empty didn't restore the default: %d", n)
+	}
+}
+
+func TestEphemeralPageAndAddMe(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, who didn't request show 20
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if b := body(t, get(t, c, app.URL+"/ephemeral")); !strings.Contains(b, "Admins Show") || !strings.Contains(b, "/ephemeral/20/join") {
+		t.Fatalf("list: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/ephemeral/20/join", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("join: %d", resp.StatusCode)
+	}
+	if b := body(t, get(t, c, app.URL+"/ephemeral")); !strings.Contains(b, "admin, bob") || strings.Contains(b, "/ephemeral/20/join") {
+		t.Fatalf("after join: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/ephemeral/10/join", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("join a movie: %d", resp.StatusCode)
+	}
+	if shows, _ := s.DB.EphemeralShows(ctx, storage.User{}); len(shows) != 1 {
+		t.Fatalf("%+v", shows)
+	}
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	s.DiscordKey, s.DiscordChannel = pub, "55"
+	press := func(id string) string {
+		payload := fmt.Sprintf(`{"type":3,"channel_id":"55","data":{"custom_id":"join:20"},"member":{"user":{"id":%q,"username":"u"}}}`, id)
+		req, _ := http.NewRequest(http.MethodPost, app.URL+"/discord/interactions", strings.NewReader(payload))
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req.Header.Set("X-Signature-Timestamp", ts)
+		req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(ed25519.Sign(priv, []byte(ts+payload))))
+		resp, err := (&http.Client{Transport: c.Transport}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body(t, resp)
+	}
+	if b := press("900"); !strings.Contains(b, "isn't linked") || !strings.Contains(b, `"flags":64`) {
+		t.Fatalf("unlinked: %s", b)
+	}
+	if ok, err := s.DB.SetDiscordUser(ctx, "900", 2); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if b := press("900"); !strings.Contains(b, "You're on **Admins Show**") {
+		t.Fatalf("linked: %s", b)
+	}
+}
+
+func TestStatusShowsWhyAndEpisodeActions(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if _, err := s.DB.ScheduleDeletion(ctx, "10", 1, true, storage.KindManual); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ScheduleDeletion(ctx, "11", 0, true, storage.KindSpace); err != nil {
+		t.Fatal(err)
+	}
+	for i, key := range []string{"202", "203"} {
+		if _, err := s.DB.ScheduleEpisode(ctx, storage.WatchedEpisode{ShowKey: "20", RatingKey: key, Title: "Admins Show", Season: 1, Episode: i + 2}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	b := body(t, get(t, c, app.URL+"/"))
+	if strings.Contains(b, "/library/item/202/") || strings.Contains(b, "/library/item/203/") || strings.Count(b, "<td>ephemeral</td>") != 1 {
+		t.Fatalf("episodes listed one by one: %s", b)
+	}
+	for _, want := range []string{"<td>manual</td>", "<td>space</td>", "Admins Show", "(2 episodes)", "/library/item/20/cancel"} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("no %s: %s", want, b)
+		}
+	}
+	if strings.Contains(b, "/library/item/20/keep") {
+		t.Fatalf("keep offered on ephemeral episodes: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/cancel", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("cancel: %d", resp.StatusCode)
+	}
+	if ds, _ := s.DB.ActiveDeletions(ctx, storage.User{IsAdmin: true}); len(ds) != 2 {
+		t.Fatalf("%+v", ds)
 	}
 }

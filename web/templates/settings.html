@@ -4,9 +4,15 @@
 {{if .Saved}}<p class="muted" role="status">saved.</p>{{end}}
 <form class="editor" method="post" action="/settings">
     <h2>delete window</h2>
-    <p class="muted">deletions only run between these times ({{.Zone}}). anything due outside them waits for the window to open. leave both empty to delete at any time.</p>
+    <p class="muted">deletions only run between these times ({{.Zone}}). anything due outside them waits for the window to open. default: {{.DefaultWin.Start}} to {{.DefaultWin.End}}. clear both to delete at any time.</p>
     <label>from <input type="time" name="window_start" value="{{.Window.Start}}"></label>
     <label>until <input type="time" name="window_end" value="{{.Window.End}}"></label>
+    <h2>space-based</h2>
+    <p class="muted">when a disk is used past this level, space-based items on it are scheduled for deletion, oldest watched first, until enough is going to get back under it. checked every hour, with the usual notice and delay. default: {{.DefaultSpace}}%; leave empty to use it.</p>
+    <label>space used (%) <input type="number" name="space_limit" min="1" max="99" value="{{.SpaceLimit}}"></label>
+    <h2>admin notices</h2>
+    <p class="muted">who gets tagged on discord when someone unlinked presses add me. a discord user ID. default: the server owner.</p>
+    <label>discord user <input type="text" name="admin_discord" inputmode="numeric" value="{{.AdminDiscord}}"></label>
     <button type="submit">save</button>
 </form>
 {{end}}

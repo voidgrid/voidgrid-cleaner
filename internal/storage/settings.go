@@ -3,8 +3,13 @@ package storage
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strconv"
 	"time"
 )
+
+// DefaultWindow applies until an admin saves another; saving both empty means any time.
+var DefaultWindow = DeleteWindow{Start: "03:00", End: "05:00"}
 
 // DeleteWindow limits deletions to part of the day, in local time. Start and
 // End are "15:04"; both empty means any time. End may be past midnight.
@@ -68,18 +73,81 @@ func (w DeleteWindow) Next(t time.Time) time.Time {
 }
 
 const (
-	settingWindowStart = "delete_window_start"
-	settingWindowEnd   = "delete_window_end"
+	settingWindowStart  = "delete_window_start"
+	settingWindowEnd    = "delete_window_end"
+	settingSpaceLimit   = "space_limit_percent"
+	settingAdminDiscord = "admin_discord_id"
 )
+
+var discordID = regexp.MustCompile(`^[0-9]{5,25}$`)
+
+// ValidAdminDiscord reports what's wrong with a Discord user ID, if anything.
+// Empty is allowed: notices then tag nobody.
+func ValidAdminDiscord(id string) error {
+	if id != "" && !discordID.MatchString(id) {
+		return errors.New("the discord user must be a numeric user ID")
+	}
+	return nil
+}
+
+// AdminDiscord returns who admin notices tag.
+func (db *DB) AdminDiscord(ctx context.Context) (string, error) {
+	return db.Setting(ctx, settingAdminDiscord, func() string { return "" })
+}
+
+// SetAdminDiscord saves who admin notices tag.
+func (db *DB) SetAdminDiscord(ctx context.Context, id string) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, settingAdminDiscord, id)
+	return err
+}
+
+// DefaultAdminDiscord fills in the default when nobody has set one.
+func (db *DB) DefaultAdminDiscord(ctx context.Context, id string) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE value = ''`, settingAdminDiscord, id)
+	return err
+}
+
+// DefaultSpaceLimit is the percent of a disk used before space-based items go.
+const DefaultSpaceLimit = 90
+
+// ParseSpaceLimit reads the percent from the settings form; empty means the default.
+func ParseSpaceLimit(s string) (int, error) {
+	if s == "" {
+		return DefaultSpaceLimit, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 99 {
+		return 0, errors.New("space used must be a percent from 1 to 99")
+	}
+	return n, nil
+}
+
+// SpaceLimit returns the saved percent. A bad stored value is an error, so
+// nothing is deleted on a guess.
+func (db *DB) SpaceLimit(ctx context.Context) (int, error) {
+	s, err := db.Setting(ctx, settingSpaceLimit, func() string { return strconv.Itoa(DefaultSpaceLimit) })
+	if err != nil {
+		return 0, err
+	}
+	return ParseSpaceLimit(s)
+}
+
+// SetSpaceLimit saves the percent.
+func (db *DB) SetSpaceLimit(ctx context.Context, percent int) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, settingSpaceLimit, strconv.Itoa(percent))
+	return err
+}
 
 // DeleteWindow returns the saved window.
 func (db *DB) DeleteWindow(ctx context.Context) (DeleteWindow, error) {
-	none := func() string { return "" }
-	start, err := db.Setting(ctx, settingWindowStart, none)
+	start, err := db.Setting(ctx, settingWindowStart, func() string { return DefaultWindow.Start })
 	if err != nil {
 		return DeleteWindow{}, err
 	}
-	end, err := db.Setting(ctx, settingWindowEnd, none)
+	end, err := db.Setting(ctx, settingWindowEnd, func() string { return DefaultWindow.End })
 	return DeleteWindow{Start: start, End: end}, err
 }
 

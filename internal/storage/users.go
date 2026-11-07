@@ -198,8 +198,20 @@ func (db *DB) SetDiscordUser(ctx context.Context, discordID string, seerrID int6
 	if seerrID == 0 {
 		return changed(db.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = NULL WHERE discord_id = ?`, discordID))
 	}
-	return changed(db.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = ?
-		WHERE discord_id = ? AND EXISTS (SELECT 1 FROM users WHERE seerr_user_id = ?)`, seerrID, discordID, seerrID))
+	// Add me presses waiting on this link apply with it.
+	err = db.tx(ctx, func(tx *sql.Tx) error {
+		if found, err = changed(tx.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = ?
+			WHERE discord_id = ? AND EXISTS (SELECT 1 FROM users WHERE seerr_user_id = ?)`, seerrID, discordID, seerrID)); err != nil || !found {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ephemeral_watchers (rating_key, seerr_user_id, added_at)
+			SELECT rating_key, ?, ? FROM discord_joins WHERE discord_id = ?`, seerrID, time.Now().Unix(), discordID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM discord_joins WHERE discord_id = ?`, discordID)
+		return err
+	})
+	return found && err == nil, err
 }
 
 // ChangeVersion goes up whenever something open pages show has changed.

@@ -340,7 +340,7 @@ func ValidStatus(s string) bool {
 // every filter set must match.
 type LibraryFilter struct {
 	Search           string // title contains this
-	Sort             string // "newest" or "oldest" by date added to Plex (a show's date doesn't move when episodes arrive), else title
+	Sort             string // "newest" or "oldest" by date added to Plex (a show's date doesn't move when episodes arrive), "watched" by oldest last play, else title
 	Status           string // only this status
 	AddedDays        int    // added at least this many days ago
 	UnwatchedDays    int    // nobody watched it in this many days, never-watched included
@@ -354,6 +354,12 @@ var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 // owned limits a query to items the user requested (any status). It is
 // the server-side ownership rule: non-admins only ever see or act on these.
 const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user_id = ? AND rating_key IS NOT NULL)`
+
+// lastWatched selects an item's newest play, 0 if never.
+const lastWatched = `coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0) AS last_watched`
+
+// byOldestWatched orders by lastWatched.
+const byOldestWatched = `last_watched = 0, last_watched, m.added_at, m.title COLLATE NOCASE`
 
 // VisibleSections lists the libraries the user may see, in Plex's order:
 // every library not ignored for an admin, only those holding something they requested
@@ -389,7 +395,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 			coalesce((SELECT group_concat(name, ', ') FROM (
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
 				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
-			coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key), 0),
+			` + lastWatched + `,
 			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal'),
 			coalesce(d.id, 0), coalesce(d.delete_after, 0),
 			coalesce((SELECT coalesce(u.display_name, du.name) FROM item_status st
@@ -434,6 +440,9 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		q += ` ORDER BY m.added_at DESC, m.title COLLATE NOCASE`
 	case "oldest":
 		q += ` ORDER BY m.added_at, m.title COLLATE NOCASE`
+	case "watched":
+		// Never-watched items go last: most of a library has no plays, and first they'd bury everything with a date.
+		q += ` ORDER BY ` + byOldestWatched
 	default:
 		q += ` ORDER BY m.title COLLATE NOCASE, m.year`
 	}
@@ -481,7 +490,7 @@ func (db *DB) SetItemStatus(ctx context.Context, ratingKey, status string, by in
 		now := time.Now().Unix()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at) VALUES (?, ?, ?, ?)
 			ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = excluded.set_by, set_at = excluded.set_at,
-				set_by_discord = NULL`,
+				set_by_discord = NULL, announced = 0`,
 			ratingKey, status, by, now); err != nil {
 			return err
 		}

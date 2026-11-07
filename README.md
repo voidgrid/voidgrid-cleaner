@@ -86,6 +86,31 @@ anyone. One person can have several accounts. Everything played on a linked
 account counts as that person, so leave shared accounts unlinked. Links don't
 affect sign-in.
 
+### Space-based items
+
+Every hour the app asks Radarr and Sonarr how full each disk is. When a disk is
+used past the level on the **settings** page (default 90%), its space-based
+items are scheduled for deletion, oldest watched first, then never-watched
+ones, until enough is going to get back under the level. Each goes through the
+usual notice and delay. A deletion that's cancelled or fails isn't tried again
+until the item is marked space-based again. Items Radarr and Sonarr don't
+manage are never picked, because nothing says which disk they're on.
+
+### Ephemeral shows
+
+Each episode of an ephemeral show is deleted once everyone on the show has
+watched it, after the usual notice and delay. The show and later episodes stay.
+Its requesters are always on it, and setting a show ephemeral posts it to
+Discord with an **Add me** button. Anyone can also add themselves on the
+**ephemeral** page, which lists these shows for everyone signed in.
+
+Someone whose Discord account isn't linked to a Seerr user is added once an
+admin links them on the **users** page; the bot tags the user set on the
+**settings** page (default: the server owner) to say so. Discord and the status
+screen never list episodes: one notice names the show and how many are going, and Keep on it
+keeps those episodes while the show stays ephemeral. Only shows Sonarr manages lose episodes, and a
+show with nobody on it loses none.
+
 ### Deletion
 
 Admins press **delete** on an item. A Discord bot posts it to a channel, and
@@ -93,8 +118,9 @@ the app deletes it 24 hours after Discord confirms the post; if the post fails,
 the clock doesn't start. Until then anyone in the channel can press **Keep**,
 and the **status** screen can keep, postpone or cancel it. Right before deleting, the app checks that nobody is watching and
 asks Radarr and Sonarr whether they manage the item. On the **settings** page,
-admins can limit deletions to a window, such as 03:00 to 05:00; anything due
-outside it waits for the window to open.
+admins can change the window deletions run in, 03:00 to 05:00 by default, or
+clear it to delete at any time; anything due outside it waits for the window
+to open.
 
 Items Radarr or Sonarr manage are unmonitored and cleared from the queue
 before their files go, so they can't be downloaded again, then removed from

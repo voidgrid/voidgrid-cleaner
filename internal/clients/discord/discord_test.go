@@ -101,3 +101,40 @@ func TestParseKeep(t *testing.T) {
 		}
 	}
 }
+
+func TestAlertAndAnnounce(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"id":"1","guild_id":"7","owner_id":"8"}`))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "t", Channel: "55"}
+	ctx := context.Background()
+	if err := c.Alert(ctx, "hi @everyone", "123"); err != nil {
+		t.Fatal(err)
+	}
+	mentions := got["allowed_mentions"].(map[string]any)
+	if got["content"] != "<@123> hi @everyone" || mentions["parse"] != nil || mentions["users"].([]any)[0] != "123" {
+		t.Fatalf("alert: %v", got)
+	}
+	if err := c.Alert(ctx, "hi", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got["content"] != "hi" {
+		t.Fatalf("no admin: %v", got)
+	}
+	if err := c.Announce(ctx, "show", "20"); err != nil {
+		t.Fatal(err)
+	}
+	row := got["components"].([]any)[0].(map[string]any)["components"].([]any)[0].(map[string]any)
+	if row["label"] != "Add me" || row["custom_id"] != "join:20" {
+		t.Fatalf("button: %v", row)
+	}
+	if key, ok := ParseJoin("join:20"); !ok || key != "20" {
+		t.Fatal(key, ok)
+	}
+	if owner, err := c.GuildOwner(ctx); err != nil || owner != "8" {
+		t.Fatal(owner, err)
+	}
+}
