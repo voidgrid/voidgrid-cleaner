@@ -85,7 +85,7 @@ func (f *fake) DeleteMedia(_ context.Context, id int64) error {
 
 func (f *fake) Activity(context.Context) ([]tautulli.Session, error) { return f.sessions, f.activity }
 
-func (f *fake) Notify(_ context.Context, _, text string) error {
+func (f *fake) Notify(context.Context, string, int64) error {
 	f.calls = append(f.calls, "notify")
 	return f.notifyErr
 }
@@ -251,7 +251,7 @@ func TestDryRunChangesNothing(t *testing.T) {
 	schedule(t, w, "10", true)
 	schedule(t, w, "11", true)
 	runDue(w, now)
-	wantCalls(t, f, "notify")
+	wantCalls(t, f, "notify", "notify")
 	d := recent(t, w)
 	if d.State != storage.DeletionDone || !d.DryRun || !strings.Contains(d.Detail, "would ") {
 		t.Fatalf("%+v", d)
@@ -434,5 +434,72 @@ func TestRestartFailsExecutingRows(t *testing.T) {
 	wantCalls(t, f, "notify")
 	if d := recent(t, w); d.State != storage.DeletionFailed {
 		t.Fatalf("%+v", d)
+	}
+}
+
+func TestKeepFromDiscord(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	schedule(t, w, "10", false)
+	w.Tick(ctx)
+	id := active(t, w)[0].ID
+	title, kept, err := w.DB.KeepFromDiscord(ctx, id, "900", "someone")
+	if err != nil || !kept || title != "Managed" {
+		t.Fatal(title, kept, err)
+	}
+	*now = now.Add(storage.DeletionDelay + time.Minute)
+	w.Tick(ctx)
+	wantCalls(t, f, "notify")
+	items, err := w.DB.LibraryItems(ctx, storage.User{IsAdmin: true}, "1", storage.LibraryFilter{Status: storage.StatusKeep})
+	if err != nil || len(items) != 1 || items[0].KeptBy != "someone" {
+		t.Fatalf("%+v %v", items, err)
+	}
+	// Pressing again changes nothing, and the name follows the link.
+	if _, kept, _ := w.DB.KeepFromDiscord(ctx, id, "901", "other"); kept {
+		t.Fatal("kept twice")
+	}
+	us, err := w.DB.DiscordUsers(ctx)
+	if err != nil || len(us) != 1 || us[0].SeerrID != 0 {
+		t.Fatalf("%+v %v", us, err)
+	}
+	if err := w.DB.UpsertUser(ctx, storage.User{SeerrID: 2, Name: "Real Name"}); err != nil {
+		t.Fatal(err)
+	}
+	if found, _ := w.DB.SetDiscordUser(ctx, "900", 99); found {
+		t.Fatal("linked to an unknown user")
+	}
+	if found, err := w.DB.SetDiscordUser(ctx, "900", 2); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	items, _ = w.DB.LibraryItems(ctx, storage.User{IsAdmin: true}, "1", storage.LibraryFilter{Status: storage.StatusKeep})
+	if items[0].KeptBy != "Real Name" {
+		t.Fatalf("%+v", items[0])
+	}
+	// An admin's later choice replaces the attribution.
+	if err := w.DB.SetItemStatus(ctx, "10", storage.StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = w.DB.LibraryItems(ctx, storage.User{IsAdmin: true}, "1", storage.LibraryFilter{Status: storage.StatusKeep})
+	if items[0].KeptBy != "" {
+		t.Fatalf("%+v", items[0])
+	}
+}
+
+// Too late: once executing, a press must not claim to have kept it.
+func TestKeepAfterClaimRefused(t *testing.T) {
+	w, _, now := setup(t)
+	ctx := context.Background()
+	schedule(t, w, "10", false)
+	w.Tick(ctx)
+	*now = now.Add(storage.DeletionDelay + time.Minute)
+	d, found, err := w.DB.ClaimDueDeletion(ctx, *now)
+	if err != nil || !found {
+		t.Fatal(found, err)
+	}
+	if _, kept, err := w.DB.KeepFromDiscord(ctx, d.ID, "900", "x"); err != nil || kept {
+		t.Fatal(kept, err)
+	}
+	if us, _ := w.DB.DiscordUsers(ctx); len(us) != 0 {
+		t.Fatalf("%+v", us)
 	}
 }

@@ -13,7 +13,7 @@
         <nav>
             <a href="/">status</a>
             <a href="/library">library</a>
-            {{if .User.IsAdmin}}<a href="/libraries">libraries</a> <a href="/users">users</a> <a href="/sync">sync</a>{{end}}
+            {{if .User.IsAdmin}}<a href="/libraries">libraries</a> <a href="/users">users{{if .User.UnlinkedDiscord}} ({{.User.UnlinkedDiscord}}){{end}}</a> <a href="/sync">sync</a>{{end}}
             <span class="muted">{{.User.Name}}{{if .User.IsAdmin}} (admin){{end}}</span>
             <form class="inline-form" method="post" action="/logout"><button type="submit">logout</button></form>
         </nav>

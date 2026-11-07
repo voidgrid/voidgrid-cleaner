@@ -23,4 +23,27 @@
     {{end}}
     </tbody>
 </table>
+{{if .Discord}}
+<h2>discord</h2>
+<p class="muted">people who pressed keep on discord. the keep already happened; linking only shows who it was.</p>
+<table>
+    <thead><tr><th>discord user</th><th>first seen</th><th>seerr user</th></tr></thead>
+    <tbody>
+    {{range .Discord}}
+    {{$cur := .SeerrID}}
+    <tr>
+        <td>{{.Name}}</td>
+        <td>{{day .FirstSeen}}</td>
+        <td><form class="inline-form" method="post" action="/users/discord/{{.DiscordID}}">
+            <select name="seerr_user" aria-label="seerr user for {{.Name}}">
+                <option value="">not linked</option>
+                {{range $.Users}}<option value="{{.SeerrID}}"{{if eq .SeerrID $cur}} selected{{end}}>{{.Name}}</option>{{end}}
+            </select>
+            <button type="submit" aria-label="save {{.Name}}">save</button>
+        </form></td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
 {{end}}

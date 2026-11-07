@@ -3,11 +3,14 @@ package web
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/discord"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
@@ -36,9 +40,12 @@ const (
 // Server holds what the handlers need.
 type Server struct {
 	DryRun bool // deletions only log what they would do
-	DB     *storage.DB
-	Seerr  *seerr.Client
-	PlexTV *plex.TV
+	// DiscordKey and DiscordChannel accept Keep presses; nil turns them off.
+	DiscordKey     ed25519.PublicKey
+	DiscordChannel string
+	DB             *storage.DB
+	Seerr          *seerr.Client
+	PlexTV         *plex.TV
 	// PinWait is how long the Plex callback waits for plex.tv to report
 	// the pin approved (it can lag the redirect slightly).
 	PinWait time.Duration
@@ -59,6 +66,7 @@ type page struct {
 	Library   *libraryPage
 	Libraries []storage.Section
 	Accounts  []storage.PlexAccount
+	Discord   []storage.DiscordUser
 	Users     []storage.User
 	Status    *statusPage
 }
@@ -146,6 +154,8 @@ func (s *Server) Router() http.Handler {
 	r.Get("/login/plex", s.loginPlex)
 	r.Get("/login/plex/callback", s.loginPlexCallback)
 	r.Post("/logout", s.logout)
+	// Signed by Discord, not a browser session; see discordInteraction.
+	r.Post("/discord/interactions", s.discordInteraction)
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireSession)
 		r.Get("/", s.status)
@@ -158,6 +168,7 @@ func (s *Server) Router() http.Handler {
 			r.Get("/libraries", s.libraries)
 			r.Get("/users", s.users)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
+			r.Post("/users/discord/{id}", s.setDiscordUser)
 			// shortcut: admins only until the request flow lets users ask for changes.
 			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
 			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion(s.DB.CancelDeletion))
@@ -219,7 +230,110 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, "users", page{User: &u, Accounts: accounts, Users: users})
+	discordUsers, err := s.DB.DiscordUsers(r.Context())
+	if err != nil {
+		log.Printf("web: discord users: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "users", page{User: &u, Accounts: accounts, Users: users, Discord: discordUsers})
+}
+
+func (s *Server) setDiscordUser(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var seerrID int64
+	if v := r.PostFormValue("seerr_user"); v != "" {
+		var err error
+		if seerrID, err = strconv.ParseInt(v, 10, 64); err != nil || seerrID == 0 {
+			http.Error(w, "bad user", http.StatusBadRequest)
+			return
+		}
+	}
+	found, err := s.DB.SetDiscordUser(r.Context(), chi.URLParam(r, "id"), seerrID)
+	if err != nil {
+		log.Printf("web: set discord user: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+// discordInteraction handles Discord's calls. The signature check comes
+// before anything reads the body, and the only action is Keep, which can stop
+// a deletion but never start one.
+func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
+	if s.DiscordKey == nil {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil || !discord.Verify(s.DiscordKey, r.Header.Get("X-Signature-Ed25519"), r.Header.Get("X-Signature-Timestamp"), body, time.Now()) {
+		http.Error(w, "bad signature", http.StatusUnauthorized)
+		return
+	}
+	var in struct {
+		Type      int    `json:"type"`
+		ChannelID string `json:"channel_id"`
+		Data      struct {
+			CustomID string `json:"custom_id"`
+		} `json:"data"`
+		Member struct {
+			Nick string `json:"nick"`
+			User struct {
+				ID         string `json:"id"`
+				Username   string `json:"username"`
+				GlobalName string `json:"global_name"`
+			} `json:"user"`
+		} `json:"member"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	reply := func(v any) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(v); err != nil {
+			log.Printf("web: discord reply: %v", err)
+		}
+	}
+	private := func(text string) { // only the presser sees it
+		reply(map[string]any{"type": 4, "data": map[string]any{"content": text, "flags": 64}})
+	}
+	const ping, component = 1, 3
+	if in.Type == ping {
+		reply(map[string]any{"type": 1})
+		return
+	}
+	id, isKeep := discord.ParseKeep(in.Data.CustomID)
+	if in.Type != component || !isKeep || in.ChannelID != s.DiscordChannel || in.Member.User.ID == "" {
+		private("That can't be done here.")
+		return
+	}
+	name := in.Member.Nick
+	for _, n := range []string{in.Member.User.GlobalName, in.Member.User.Username} {
+		if name == "" {
+			name = n
+		}
+	}
+	title, kept, err := s.DB.KeepFromDiscord(r.Context(), id, in.Member.User.ID, name)
+	if err != nil {
+		log.Printf("web: discord keep: %v", err)
+		private("Something went wrong, so it wasn't kept. Tell an admin.")
+		return
+	}
+	if !kept {
+		private("Too late: that deletion isn't waiting any more.")
+		return
+	}
+	// Update the message, dropping the button. Mentions stay off for the name too.
+	reply(map[string]any{"type": 7, "data": map[string]any{
+		"content": "**" + title + "** was kept by " + name + ".", "components": []any{},
+		"allowed_mentions": map[string]any{"parse": []string{}},
+	}})
 }
 
 func (s *Server) setPlexAccount(w http.ResponseWriter, r *http.Request) {

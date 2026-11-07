@@ -39,8 +39,9 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_SONARR_API_KEY` | yes | | Sonarr API key (Settings → General) |
 | `VGC_TAUTULLI_URL` | yes | | Tautulli URL, e.g. `http://tautulli:8181` |
 | `VGC_TAUTULLI_API_KEY` | yes | | Tautulli API key (Settings → Web Interface) |
-| `VGC_NOTIFIARR_API_KEY` | for live deletion | | Notifiarr API key |
-| `VGC_NOTIFIARR_CHANNEL` | for live deletion | | Discord channel ID for notifications |
+| `VGC_DISCORD_BOT_TOKEN` | for live deletion | | Discord bot token |
+| `VGC_DISCORD_PUBLIC_KEY` | for live deletion | | The Discord application's public key |
+| `VGC_DISCORD_CHANNEL` | for live deletion | | Channel ID for notifications |
 | `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
 | `VGC_DB_PATH` | no | `/data/voidgrid-cleaner.db` | SQLite database file |
@@ -86,10 +87,10 @@ affect sign-in.
 
 ### Deletion
 
-Admins press **delete** on an item. The app posts to Discord through Notifiarr
-and deletes 24 hours after Notifiarr confirms; if the notification fails, the
-clock doesn't start. Until then the **status** screen can keep, postpone or
-cancel it. Right before deleting, the app checks that nobody is watching and
+Admins press **delete** on an item. A Discord bot posts it to a channel, and
+the app deletes it 24 hours after Discord confirms the post; if the post fails,
+the clock doesn't start. Until then anyone in the channel can press **Keep**,
+and the **status** screen can keep, postpone or cancel it. Right before deleting, the app checks that nobody is watching and
 asks Radarr and Sonarr whether they manage the item.
 
 Items Radarr or Sonarr manage are unmonitored and cleared from the queue
@@ -99,6 +100,20 @@ Seerr. Anything else is deleted through Plex.
 Until `VGC_DELETE_LIVE=true`, everything runs as a dry run: the status screen
 shows what would have happened and nothing changes. Items scheduled during a
 dry run stay dry-run after you turn it on.
+
+### Discord bot
+
+Create an application in the Discord Developer Portal, invite its bot to your
+server with View Channels and Send Messages, and set the three `VGC_DISCORD_`
+variables. Once the app is running, set the application's **Interactions
+Endpoint URL** to `https://<host>/discord/interactions`.
+
+That path must be reachable from the internet and must not sit behind anything
+that bans on failed requests: Discord sends invalid signatures on purpose to
+test it, and every request is checked against the application's public key.
+The only action it accepts is Keep. A Keep works straight away; people who
+press it appear on the **users** page, where admins can link them to a Seerr
+user to show who it was.
 
 ### Who can sign in
 

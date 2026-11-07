@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	notifyBatch = 30 // titles per message, well inside Discord's size limit
+	notifyBatch = 5 // messages per tick, inside Discord's rate limit for a channel
 	// notifyRetry spaces out failed sends: a send that reached Discord but
 	// whose reply we couldn't read must not repeat every tick.
 	notifyRetry = time.Hour
@@ -56,7 +56,7 @@ type (
 		Activity(context.Context) ([]tautulli.Session, error)
 	}
 	Notifier interface {
-		Notify(ctx context.Context, title, text string) error
+		Notify(ctx context.Context, text string, deletionID int64) error
 	}
 )
 
@@ -119,21 +119,24 @@ func (w *Worker) notify(ctx context.Context) error {
 	if err != nil || len(ds) == 0 {
 		return err
 	}
-	lines := make([]string, len(ds))
-	for i, d := range ds {
-		lines[i] = "- " + d.Title
+	for _, d := range ds {
+		after := w.Now().Add(storage.DeletionDelay)
+		// <t:...> shows in each reader's own time zone.
+		text := fmt.Sprintf("**%s** will be deleted <t:%d:f> unless someone presses Keep.", d.Title, after.Unix())
 		if d.DryRun || w.DryRun {
-			lines[i] += " (dry run, nothing will be deleted)"
+			text += " (dry run: nothing will really be deleted)"
+		}
+		if w.Notify == nil {
+			log.Printf("deleter: dry run, no notifier: %s", text)
+		} else if err := w.Notify.Notify(ctx, text, d.ID); err != nil {
+			w.notifyAfter = w.Now().Add(notifyRetry)
+			return err
+		}
+		if err := w.DB.MarkNotified(ctx, d.ID, after); err != nil {
+			return err
 		}
 	}
-	text := "Deleting in 24 hours unless kept:\n" + strings.Join(lines, "\n")
-	if w.Notify == nil {
-		log.Printf("deleter: dry run, no notifier: %s", text)
-	} else if err := w.Notify.Notify(ctx, "Scheduled for deletion", text); err != nil {
-		w.notifyAfter = w.Now().Add(notifyRetry)
-		return err
-	}
-	return w.DB.MarkNotified(ctx, ds, w.Now().Add(storage.DeletionDelay))
+	return nil
 }
 
 // errBusy puts a deletion back on the clock instead of failing it.

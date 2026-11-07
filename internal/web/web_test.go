@@ -2,9 +2,12 @@ package web
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -12,9 +15,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
@@ -583,5 +588,110 @@ func TestDeletionScreens(t *testing.T) {
 	}
 	if b := body(t, get(t, c, app.URL+"/library/1")); strings.Contains(b, "/library/item/10/delete") {
 		t.Fatal("keep item offers delete")
+	}
+}
+
+func TestDiscordInteractions(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	anon := &http.Client{Transport: c.Transport}
+	send := func(key ed25519.PrivateKey, payload string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, app.URL+"/discord/interactions", strings.NewReader(payload))
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req.Header.Set("X-Signature-Timestamp", ts)
+		req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(ed25519.Sign(key, []byte(ts+payload))))
+		resp, err := anon.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, body(t, resp)
+	}
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	_, other, _ := ed25519.GenerateKey(nil)
+	if code, _ := send(priv, `{"type":1}`); code != http.StatusNotFound {
+		t.Fatalf("route without a key: %d", code)
+	}
+	s.DiscordKey, s.DiscordChannel = pub, "55"
+
+	if code, b := send(priv, `{"type":1}`); code != http.StatusOK || !strings.Contains(b, `"type":1`) {
+		t.Fatalf("ping: %d %s", code, b)
+	}
+	if ok, err := s.DB.ScheduleDeletion(ctx, "10", 1, true); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	admin := storage.User{IsAdmin: true}
+	ds, _ := s.DB.ActiveDeletions(ctx, admin)
+	press := func(channel, customID string) string {
+		return fmt.Sprintf(`{"type":3,"channel_id":%q,"data":{"custom_id":%q},"member":{"user":{"id":"900","username":"u","global_name":"Display"}}}`, channel, customID)
+	}
+	keep := "keep:" + strconv.FormatInt(ds[0].ID, 10)
+
+	// A forged signature changes nothing, and neither does a real one
+	// from the wrong channel or for anything but Keep.
+	if code, _ := send(other, press("55", keep)); code != http.StatusUnauthorized {
+		t.Fatalf("forged: %d", code)
+	}
+	req, _ := http.NewRequest(http.MethodPost, app.URL+"/discord/interactions", strings.NewReader(press("55", keep)))
+	resp, err := anon.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned: %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	for _, b := range []string{press("66", keep), press("55", "delete:1"), `{"type":2,"channel_id":"55","data":{"custom_id":"` + keep + `"}}`} {
+		if code, out := send(priv, b); code != http.StatusOK || !strings.Contains(out, `"flags":64`) {
+			t.Fatalf("%s: %d %s", b, code, out)
+		}
+	}
+	if ds, _ := s.DB.ActiveDeletions(ctx, admin); len(ds) != 1 {
+		t.Fatalf("refused presses changed something: %+v", ds)
+	}
+
+	code, out := send(priv, press("55", keep))
+	if code != http.StatusOK || !strings.Contains(out, `"type":7`) || !strings.Contains(out, "Bobs Movie") || !strings.Contains(out, "kept by Display") {
+		t.Fatalf("keep: %d %s", code, out)
+	}
+	if ds, _ := s.DB.ActiveDeletions(ctx, admin); len(ds) != 0 {
+		t.Fatalf("still scheduled: %+v", ds)
+	}
+	if code, out := send(priv, press("55", keep)); code != http.StatusOK || !strings.Contains(out, "Too late") {
+		t.Fatalf("second press: %d %s", code, out)
+	}
+
+	// The unlinked presser shows up for admins, and can be linked.
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	b := body(t, get(t, c, app.URL+"/users"))
+	if !strings.Contains(b, "users (1)") || !strings.Contains(b, "Display") {
+		t.Fatalf("users page: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1")); !strings.Contains(b, "by Display, on discord") {
+		t.Fatalf("library: %s", b)
+	}
+	if resp := postForm(t, c, app.URL+"/users/discord/900", url.Values{"seerr_user": {"2"}}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("link: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/users/discord/999", url.Values{"seerr_user": {"2"}}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown discord user: %d", resp.StatusCode)
+	}
+	b = body(t, get(t, c, app.URL+"/users"))
+	if strings.Contains(b, "users (1)") || !strings.Contains(b, `value="2" selected`) {
+		t.Fatalf("after link: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1")); !strings.Contains(b, "by bob, on discord") {
+		t.Fatalf("library after link: %s", b)
+	}
+}
+
+func TestDiscordUserLinkAdminOnly(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := postForm(t, c, app.URL+"/users/discord/900", url.Values{"seerr_user": {"2"}}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin link: %d", resp.StatusCode)
 	}
 }

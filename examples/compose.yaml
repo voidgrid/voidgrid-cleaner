@@ -17,9 +17,10 @@ services:
       VGC_SONARR_API_KEY: CHANGEME
       VGC_TAUTULLI_URL: http://tautulli:8181
       VGC_TAUTULLI_API_KEY: CHANGEME
-      # Deletion is a dry run until these three are set:
-      # VGC_NOTIFIARR_API_KEY: CHANGEME
-      # VGC_NOTIFIARR_CHANNEL: "123456789012345678"
+      # Deletion is a dry run until these are set:
+      # VGC_DISCORD_BOT_TOKEN: CHANGEME
+      # VGC_DISCORD_PUBLIC_KEY: CHANGEME
+      # VGC_DISCORD_CHANNEL: CHANGEME
       # VGC_DELETE_LIVE: "true"
     volumes:
       - ./data:/data  # must be writable by uid 1000

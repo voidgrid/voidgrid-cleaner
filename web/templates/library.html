@@ -52,7 +52,7 @@
             <div>
                 <h2>{{.Title}}{{if .Year}} <span class="muted">({{.Year}})</span>{{end}}</h2>
                 <dl>
-                    <dt>status</dt><dd>{{statusName .Status}}</dd>
+                    <dt>status</dt><dd>{{statusName .Status}}{{if .KeptBy}} <span class="muted">by {{.KeptBy}}, on discord</span>{{end}}</dd>
                     {{if .DeletionID}}<dt>deleting</dt><dd>{{if .DeleteAfter}}{{when .DeleteAfter}}{{else}}waiting for notification{{end}}</dd>{{end}}
                     <dt>added</dt><dd>{{day .AddedAt}}</dd>
                     <dt>size</dt><dd>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">unknown</span>{{end}}</dd>

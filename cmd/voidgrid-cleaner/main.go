@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
-	"github.com/voidgrid/voidgrid-cleaner/internal/clients/notifiarr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/discord"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
@@ -89,15 +89,17 @@ func run() error {
 		DryRun:   !cfg.DeleteLive,
 		Now:      time.Now,
 	}
-	if cfg.NotifiarrAPIKey != "" {
-		worker.Notify = &notifiarr.Client{BaseURL: "https://notifiarr.com", APIKey: cfg.NotifiarrAPIKey, Channel: cfg.NotifiarrChannel, HTTP: hc}
+	if cfg.DiscordBotToken != "" {
+		worker.Notify = &discord.Client{BaseURL: "https://discord.com/api/v10", Token: cfg.DiscordBotToken, Channel: cfg.DiscordChannel, HTTP: hc}
 	}
 	s := &web.Server{
-		DryRun:  worker.DryRun,
-		DB:      db,
-		Seerr:   sc,
-		PlexTV:  &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
-		PinWait: 3 * time.Second,
+		DryRun:         worker.DryRun,
+		DiscordKey:     cfg.DiscordPublicKey,
+		DiscordChannel: cfg.DiscordChannel,
+		DB:             db,
+		Seerr:          sc,
+		PlexTV:         &plex.TV{BaseURL: "https://plex.tv", AppURL: "https://app.plex.tv/auth", ClientID: clientID, Product: "voidgrid-cleaner", HTTP: hc},
+		PinWait:        3 * time.Second,
 		// Posters fetch with the short timeout: a page waits on them.
 		Posters:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
 		PosterCache: posters,

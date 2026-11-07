@@ -20,6 +20,8 @@ type User struct {
 	PlexID      sql.NullInt64
 	IsAdmin     bool
 	AutoApprove bool
+	// UnlinkedDiscord counts Discord users waiting for a link; admins only.
+	UnlinkedDiscord int
 }
 
 // Setting returns the value stored under key, creating it with fallback()
@@ -61,10 +63,11 @@ func (db *DB) CreateSession(ctx context.Context, seerrID int64, ttl time.Duratio
 func (db *DB) SessionUser(ctx context.Context, token string) (User, error) {
 	var u User
 	err := db.QueryRowContext(ctx, `
-		SELECT u.seerr_user_id, u.display_name, u.plex_id, u.is_admin, u.auto_approve
+		SELECT u.seerr_user_id, u.display_name, u.plex_id, u.is_admin, u.auto_approve,
+			CASE WHEN u.is_admin THEN (SELECT count(*) FROM discord_users WHERE seerr_user_id IS NULL) ELSE 0 END
 		FROM sessions s JOIN users u USING (seerr_user_id)
 		WHERE s.token_hash = ? AND s.expires_at > ?`, hashToken(token), time.Now().Unix()).
-		Scan(&u.SeerrID, &u.Name, &u.PlexID, &u.IsAdmin, &u.AutoApprove)
+		Scan(&u.SeerrID, &u.Name, &u.PlexID, &u.IsAdmin, &u.AutoApprove, &u.UnlinkedDiscord)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNoSession
 	}
@@ -158,4 +161,43 @@ func (db *DB) Users(ctx context.Context) ([]User, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// DiscordUser is someone who pressed Keep. SeerrID is the user an admin
+// linked them to, 0 if none.
+type DiscordUser struct {
+	DiscordID string
+	Name      string
+	SeerrID   int64
+	FirstSeen int64
+}
+
+// DiscordUsers lists them, unlinked first.
+func (db *DB) DiscordUsers(ctx context.Context) ([]DiscordUser, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT discord_id, name, coalesce(seerr_user_id, 0), first_seen FROM discord_users
+		ORDER BY seerr_user_id IS NOT NULL, name COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []DiscordUser
+	for rows.Next() {
+		var u DiscordUser
+		if err := rows.Scan(&u.DiscordID, &u.Name, &u.SeerrID, &u.FirstSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetDiscordUser links a Discord user to a Seerr user, or unlinks them when
+// seerrID is 0. found is false if either doesn't exist.
+func (db *DB) SetDiscordUser(ctx context.Context, discordID string, seerrID int64) (found bool, err error) {
+	if seerrID == 0 {
+		return changed(db.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = NULL WHERE discord_id = ?`, discordID))
+	}
+	return changed(db.ExecContext(ctx, `UPDATE discord_users SET seerr_user_id = ?
+		WHERE discord_id = ? AND EXISTS (SELECT 1 FROM users WHERE seerr_user_id = ?)`, seerrID, discordID, seerrID))
 }

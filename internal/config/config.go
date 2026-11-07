@@ -4,6 +4,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -25,9 +27,10 @@ type Config struct {
 	SonarrAPIKey   string
 	TautulliURL    string
 	TautulliAPIKey string
-	// Notifications are optional only while deletion is a dry run.
-	NotifiarrAPIKey  string
-	NotifiarrChannel int64
+	// Discord is optional only while deletion is a dry run.
+	DiscordBotToken  string
+	DiscordPublicKey ed25519.PublicKey
+	DiscordChannel   string
 	DeleteLive       bool
 }
 
@@ -61,19 +64,24 @@ func Load() (Config, error) {
 	if len(missing) > 0 {
 		return c, fmt.Errorf("config: required but not set: %s", strings.Join(missing, ", "))
 	}
-	c.NotifiarrAPIKey = os.Getenv("VGC_NOTIFIARR_API_KEY")
-	if ch := os.Getenv("VGC_NOTIFIARR_CHANNEL"); ch != "" {
-		var err error
-		if c.NotifiarrChannel, err = strconv.ParseInt(ch, 10, 64); err != nil {
-			return c, errors.New("config: VGC_NOTIFIARR_CHANNEL must be a Discord channel ID")
+	c.DiscordBotToken, c.DiscordChannel = os.Getenv("VGC_DISCORD_BOT_TOKEN"), os.Getenv("VGC_DISCORD_CHANNEL")
+	key := os.Getenv("VGC_DISCORD_PUBLIC_KEY")
+	if c.DiscordBotToken == "" != (key == "") || key == "" != (c.DiscordChannel == "") {
+		return c, errors.New("config: VGC_DISCORD_BOT_TOKEN, VGC_DISCORD_PUBLIC_KEY and VGC_DISCORD_CHANNEL go together")
+	}
+	if key != "" {
+		b, err := hex.DecodeString(key)
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			return c, errors.New("config: VGC_DISCORD_PUBLIC_KEY must be the application's hex public key")
+		}
+		c.DiscordPublicKey = b
+		if _, err := strconv.ParseUint(c.DiscordChannel, 10, 64); err != nil {
+			return c, errors.New("config: VGC_DISCORD_CHANNEL must be a Discord channel ID")
 		}
 	}
-	if (c.NotifiarrAPIKey == "") != (c.NotifiarrChannel == 0) {
-		return c, errors.New("config: VGC_NOTIFIARR_API_KEY and VGC_NOTIFIARR_CHANNEL go together")
-	}
 	c.DeleteLive = os.Getenv("VGC_DELETE_LIVE") == "true"
-	if c.DeleteLive && c.NotifiarrAPIKey == "" {
-		return c, errors.New("config: VGC_DELETE_LIVE needs VGC_NOTIFIARR_API_KEY and VGC_NOTIFIARR_CHANNEL")
+	if c.DeleteLive && c.DiscordBotToken == "" {
+		return c, errors.New("config: VGC_DELETE_LIVE needs the VGC_DISCORD_ settings")
 	}
 	return c, nil
 }

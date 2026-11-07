@@ -95,18 +95,12 @@ func (db *DB) UnnotifiedDeletions(ctx context.Context, limit int) ([]Deletion, e
 	return db.deletions(ctx, `SELECT `+deletionCols+` FROM deletions WHERE state = ? ORDER BY id LIMIT ?`, DeletionScheduled, limit)
 }
 
-// MarkNotified starts the clock on deletions whose notification was
-// confirmed; any cancelled meanwhile are left alone.
-func (db *DB) MarkNotified(ctx context.Context, ds []Deletion, deleteAfter time.Time) error {
-	return db.tx(ctx, func(tx *sql.Tx) error {
-		for _, d := range ds {
-			if _, err := tx.ExecContext(ctx, `UPDATE deletions SET state = ?, delete_after = ? WHERE id = ? AND state = ?`,
-				DeletionNotified, deleteAfter.Unix(), d.ID, DeletionScheduled); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+// MarkNotified starts the clock on a deletion whose notification was
+// confirmed. One cancelled meanwhile is left alone.
+func (db *DB) MarkNotified(ctx context.Context, id int64, deleteAfter time.Time) error {
+	_, err := db.ExecContext(ctx, `UPDATE deletions SET state = ?, delete_after = ? WHERE id = ? AND state = ?`,
+		DeletionNotified, deleteAfter.Unix(), id, DeletionScheduled)
+	return err
 }
 
 // ClaimDueDeletion moves the oldest due deletion to executing, from which it
@@ -193,4 +187,33 @@ func (db *DB) ActiveDeletions(ctx context.Context, u User) ([]Deletion, error) {
 func (db *DB) RecentDeletions(ctx context.Context, u User, limit int) ([]Deletion, error) {
 	q, args := visibleDeletions(u, `d.state IN (?, ?)`, []any{DeletionDone, DeletionFailed})
 	return db.deletions(ctx, q+` ORDER BY d.finished_at DESC, d.id DESC LIMIT ?`, append(args, limit)...)
+}
+
+// KeepFromDiscord stops a deletion and sets its item to keep, in one
+// transaction so the worker can't claim it in between. kept is false if the
+// deletion is no longer waiting, whatever happened to it.
+func (db *DB) KeepFromDiscord(ctx context.Context, deletionID int64, discordID, name string) (title string, kept bool, err error) {
+	err = db.tx(ctx, func(tx *sql.Tx) error {
+		now := time.Now().Unix()
+		var key string
+		err := tx.QueryRowContext(ctx, `
+			UPDATE deletions SET state = ?, finished_at = ? WHERE id = ? AND state IN (?, ?) RETURNING rating_key, title`,
+			DeletionCancelled, now, deletionID, DeletionScheduled, DeletionNotified).Scan(&key, &title)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO discord_users (discord_id, name, first_seen) VALUES (?, ?, ?)
+			ON CONFLICT (discord_id) DO UPDATE SET name = excluded.name`, discordID, name, now); err != nil {
+			return err
+		}
+		kept = true
+		_, err = tx.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at, set_by_discord) VALUES (?, ?, 0, ?, ?)
+			ON CONFLICT (rating_key) DO UPDATE SET status = excluded.status, set_by = 0, set_at = excluded.set_at,
+				set_by_discord = excluded.set_by_discord`, key, StatusKeep, now, discordID)
+		return err
+	})
+	return title, kept && err == nil, err
 }
