@@ -79,7 +79,6 @@ type (
 		DiskSpace(context.Context) ([]arr.DiskSpace, error)
 		Health(context.Context) ([]arr.Health, error)
 		BlocklistSize(context.Context) (int, error)
-		MissingCount(context.Context) (int, error)
 		MediaManagement(context.Context) (arr.MediaManagement, error)
 		commander
 	}
@@ -94,12 +93,20 @@ type (
 		ImportFiles(context.Context, int64, string) ([]arr.ImportFile, error)
 		MediaManagementRaw(context.Context) (map[string]any, error)
 		SetMediaManagement(context.Context, map[string]any) error
+		UnmonitorMovie(context.Context, int64) error
+		MonitorMovie(context.Context, int64) error
+		RemoveMovie(context.Context, int64) error
 	}
 	SonarrAPI interface {
 		ArrAPI
 		Series(context.Context) ([]arr.Series, error)
 		RenamePreview(context.Context, int64) ([]arr.Rename, error)
 		EpisodeFiles(context.Context, int64) ([]arr.EpisodeFile, error)
+		MissingEpisodes(context.Context) ([]arr.MissingEpisode, error)
+		OneSeries(context.Context, int64) (arr.Series, error)
+		UnmonitorSeries(context.Context, int64) error
+		UnmonitorEpisodes(context.Context, []int64) error
+		RemoveSeries(context.Context, int64) error
 		LookupSeries(context.Context, string) ([]map[string]any, error)
 		AddSeries(context.Context, map[string]any) (int64, error)
 	}
@@ -142,7 +149,6 @@ type arrState struct {
 	disks    []arr.DiskSpace
 	health   []arr.Health
 	block    int
-	missing  int
 	settings arr.MediaManagement
 }
 
@@ -157,9 +163,6 @@ func readArr(ctx context.Context, a ArrAPI) (s arrState, err error) {
 		return s, err
 	}
 	if s.block, err = a.BlocklistSize(ctx); err != nil {
-		return s, err
-	}
-	if s.missing, err = a.MissingCount(ctx); err != nil {
 		return s, err
 	}
 	s.settings, err = a.MediaManagement(ctx)
@@ -179,6 +182,7 @@ type snapshot struct {
 	radarr, sonarr             arrState
 	movies                     []arr.Movie
 	series                     []arr.Series
+	missingEpisodes            []arr.MissingEpisode
 	libraries                  []library
 	showPaths                  map[string]string // rating key to folder, for shows the IDs didn't match
 	paths                      []storage.LibraryPath
@@ -197,6 +201,9 @@ func (d *Doctor) read(ctx context.Context) snapshot {
 	s.sonarr, err = readArr(ctx, d.Sonarr)
 	if err == nil {
 		s.series, err = d.Sonarr.Series(ctx)
+	}
+	if err == nil {
+		s.missingEpisodes, err = d.Sonarr.MissingEpisodes(ctx)
 	}
 	if s.sonarrOK = err == nil; err != nil {
 		log.Printf("doctor: sonarr: %v", err)

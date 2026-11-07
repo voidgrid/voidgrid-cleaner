@@ -108,7 +108,8 @@ Entries with a checkbox can be fixed from here: wrong and questionable Plex matc
 fix is a metadata refresh, not a rematch. Radarr and Sonarr issues can be fixed too: renaming files to match your format, adding
 an untracked folder (unmonitored, with no search, so nothing downloads), importing a file Radarr won't accept with a quality you
 pick, and stopping Radarr leaving empty folders. On managed paths it can also remove empty folders and delete stray files, and it
-can clear stale Seerr requests. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix only reports what it would delete. Tick them and press **preview** to see exactly what would change; nothing
+can clear stale Seerr requests. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie TMDb
+removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix only reports what it would delete. Tick them and press **preview** to see exactly what would change; nothing
 happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
 deleted.
 

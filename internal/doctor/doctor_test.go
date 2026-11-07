@@ -37,8 +37,6 @@ func (f *fakeArr) Health(context.Context) ([]arr.Health, error) { return f.state
 
 func (f *fakeArr) BlocklistSize(context.Context) (int, error) { return f.state.block, nil }
 
-func (f *fakeArr) MissingCount(context.Context) (int, error) { return f.state.missing, nil }
-
 func (f *fakeArr) MediaManagement(context.Context) (arr.MediaManagement, error) {
 	return f.state.settings, nil
 }
@@ -64,6 +62,7 @@ type fakeRadarr struct {
 	files          []arr.ImportFile
 	savedSettings  map[string]any
 	ignoreSettings bool
+	calls          []string
 }
 
 func (f *fakeRadarr) Movies(context.Context) ([]arr.Movie, error) { return f.movies, nil }
@@ -95,6 +94,21 @@ func (f *fakeRadarr) ImportFiles(context.Context, int64, string) ([]arr.ImportFi
 	return f.files, nil
 }
 
+func (f *fakeRadarr) UnmonitorMovie(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("unmonitor %d", id))
+	return nil
+}
+
+func (f *fakeRadarr) MonitorMovie(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("monitor %d", id))
+	return nil
+}
+
+func (f *fakeRadarr) RemoveMovie(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("remove %d", id))
+	return nil
+}
+
 func (f *fakeRadarr) MediaManagementRaw(context.Context) (map[string]any, error) {
 	return map[string]any{"keepMe": "yes", "deleteEmptyFolders": false, "createEmptyMovieFolders": true}, nil
 }
@@ -113,6 +127,10 @@ type fakeSonarr struct {
 	files    []arr.EpisodeFile
 	filesErr error
 	added    map[string]any
+
+	episodes  []arr.MissingEpisode
+	fileCount int
+	calls     []string
 }
 
 func (f *fakeSonarr) Series(context.Context) ([]arr.Series, error) { return f.series, nil }
@@ -126,6 +144,31 @@ func (f *fakeSonarr) EpisodeFiles(context.Context, int64) ([]arr.EpisodeFile, er
 
 func (f *fakeSonarr) LookupSeries(context.Context, string) ([]map[string]any, error) {
 	return []map[string]any{{"title": "Found Show", "year": float64(2001), "tvdbId": float64(8), "seasons": []any{map[string]any{"seasonNumber": float64(1), "monitored": true}}}}, nil
+}
+
+func (f *fakeSonarr) MissingEpisodes(context.Context) ([]arr.MissingEpisode, error) {
+	return f.episodes, nil
+}
+
+func (f *fakeSonarr) OneSeries(_ context.Context, id int64) (arr.Series, error) {
+	s := arr.Series{ID: id}
+	s.Statistics.EpisodeFileCount = f.fileCount
+	return s, nil
+}
+
+func (f *fakeSonarr) UnmonitorSeries(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("unmonitor series %d", id))
+	return nil
+}
+
+func (f *fakeSonarr) UnmonitorEpisodes(_ context.Context, ids []int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("unmonitor episodes %v", ids))
+	return nil
+}
+
+func (f *fakeSonarr) RemoveSeries(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("remove series %d", id))
+	return nil
 }
 
 func (f *fakeSonarr) AddSeries(_ context.Context, m map[string]any) (int64, error) {
@@ -200,9 +243,16 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 type fakeSeerr struct {
 	deleted []int64
 	err     error
+	noTitle bool
 }
 
-func (*fakeSeerr) Title(context.Context, string, int64) (string, error) { return "Gone Film", nil }
+func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
+	if f.noTitle {
+		return "", errors.New("404")
+	}
+	return "Gone Film", nil
+}
+
 func (f *fakeSeerr) DeleteMedia(_ context.Context, id int64) error {
 	f.deleted = append(f.deleted, id)
 	return f.err
@@ -455,8 +505,9 @@ func TestSettingsAndReports(t *testing.T) {
 	w := newWorld(t)
 	w.radarr.state.settings = arr.MediaManagement{CreateEmptyMovieFolders: true}
 	w.radarr.state.block = 3
-	w.radarr.state.health = []arr.Health{{Source: "RemovedMovieCheck", Type: "error", Message: "removed"}}
-	w.sonarr.state.missing = 2
+	w.radarr.state.health = []arr.Health{{Source: "IndexerCheck", Type: "error", Message: "no indexers", WikiURL: "https://wiki/x"}}
+	w.sonarr.episodes = []arr.MissingEpisode{{ID: 1, SeriesID: 3, SeasonNumber: 7, EpisodeNumber: 2, Title: "Chrysalis"}}
+	w.sonarr.episodes[0].Series.Title = "Miraculous"
 	w.plex.local = true
 	w.radarr.rename = []arr.Rename{{ExistingPath: "/m/a.mkv", NewPath: "/m/b.mkv"}}
 	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 2, Title: "Lost", TmdbID: 2, IsAvailable: true})
@@ -1188,5 +1239,149 @@ func TestStrayFileDryRunDeletesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(stray); err != nil {
 		t.Fatal("a dry run deleted a file", err)
+	}
+}
+
+func TestStaleRequestSaysWhoAskedWhenTheNameIsGone(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	if err := w.d.DB.UpsertUser(ctx, storage.User{SeerrID: 1, Name: "Ann"}); err != nil {
+		t.Fatal(err)
+	}
+	w.seerr.noTitle = true
+	if err := w.d.DB.ReplaceRequests(ctx, []storage.Request{{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "movie", TmdbID: 42, Status: 2, CreatedAt: 1_700_000_000}}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindStaleRequest)
+	if len(fs) != 1 || fs[0].Title != "unknown movie (TMDB 42)" || !strings.Contains(fs[0].Detail, "by Ann on 2023-11-14") || !strings.Contains(fs[0].Detail, "no longer has") {
+		t.Fatalf("%+v", fs)
+	}
+}
+
+func TestMissingEpisodesNameTheirSeries(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.sonarr.series = []arr.Series{{ID: 3, Title: "Miraculous", TvdbID: 9, Path: w.root}, {ID: 4, Title: "Empty", TvdbID: 10, Path: w.root}}
+	w.sonarr.series[0].Statistics.EpisodeFileCount = 5
+	a := arr.MissingEpisode{ID: 71, SeriesID: 3, SeasonNumber: 7, EpisodeNumber: 2, Title: "Chrysalis"}
+	a.Series.Title = "Miraculous"
+	b := arr.MissingEpisode{ID: 72, SeriesID: 4, SeasonNumber: 1, EpisodeNumber: 1, Title: "Pilot"}
+	b.Series.Title = "Empty"
+	w.sonarr.episodes = []arr.MissingEpisode{a, b}
+	w.run(t)
+	var eps storage.Finding
+	for _, f := range w.open(t, KindMissing) {
+		if strings.HasPrefix(f.Subject, "episodes:") {
+			if eps.ID != 0 {
+				t.Fatal("a series with no files was listed twice")
+			}
+			eps = f
+		}
+	}
+	if eps.Title != "Miraculous: 1 missing" || !strings.Contains(eps.Detail, "S07E02 Chrysalis") {
+		t.Fatalf("%+v", eps)
+	}
+	p, err := w.d.Preview(ctx, eps)
+	if err != nil || !p.CanFix || len(p.Choices) != 2 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if j := w.fix(t, eps, doSearch); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if c := w.sonarr.commands[0]; c["name"] != "EpisodeSearch" || fmt.Sprint(c["episodeIds"]) != "[71]" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func (w *world) missingMovie(t *testing.T, monitored bool) storage.Finding {
+	t.Helper()
+	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 2, Title: "Lost", Year: 2008, TmdbID: 2, IsAvailable: true, Monitored: monitored})
+	w.run(t)
+	fs := w.open(t, KindMissing)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0]
+}
+
+func TestMissingMovieChoicesFollowMonitoring(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	p, err := w.d.Preview(ctx, w.missingMovie(t, true))
+	if err != nil || p.Choices[0].Value != doSearch {
+		t.Fatalf("%+v %v", p, err)
+	}
+	w = newWorld(t)
+	p, err = w.d.Preview(ctx, w.missingMovie(t, false))
+	if err != nil || p.Choices[0].Value != doMonitorSearch {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestMonitorAndSearchDoesBoth(t *testing.T) {
+	w := newWorld(t)
+	f := w.missingMovie(t, false)
+	if j := w.fix(t, f, doMonitorSearch); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if fmt.Sprint(w.radarr.calls) != "[monitor 2]" || w.radarr.commands[0]["name"] != "MoviesSearch" {
+		t.Fatalf("%v %+v", w.radarr.calls, w.radarr.commands)
+	}
+}
+
+func TestRemoveMissingMovieLeavesOneThatGotAFile(t *testing.T) {
+	w := newWorld(t)
+	f := w.missingMovie(t, true)
+	w.radarr.gotFile = true
+	if j := w.fix(t, f, doRemove); j.State != "failed" || len(w.radarr.calls) != 0 {
+		t.Fatalf("%+v %v", j, w.radarr.calls)
+	}
+}
+
+func TestRemoveSeriesLeavesOneThatGotFiles(t *testing.T) {
+	w := newWorld(t)
+	w.sonarr.series = []arr.Series{{ID: 4, Title: "Empty", TvdbID: 10, Path: w.root}}
+	w.run(t)
+	f := w.open(t, KindMissing)[0]
+	w.sonarr.fileCount = 2
+	if j := w.fix(t, f, doRemove); j.State != "failed" || len(w.sonarr.calls) != 0 {
+		t.Fatalf("%+v %v", j, w.sonarr.calls)
+	}
+}
+
+func TestMissingNeedsAChoice(t *testing.T) {
+	w := newWorld(t)
+	f := w.missingMovie(t, true)
+	if j := w.fix(t, f, "whatever"); j.State != "failed" || len(w.radarr.commands) != 0 {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestRemovedMovieGetsItsOwnFinding(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.radarr.state.health = []arr.Health{{Source: "RemovedMovieCheck", Type: "error", Message: "Movie Film (tmdbid 100) was removed from TMDb"}}
+	w.run(t)
+	fs := w.open(t, KindHealth)
+	if len(fs) != 1 || !Fixable(fs[0].Kind, fs[0].Subject) || fs[0].Title != "Film (2000)" {
+		t.Fatalf("%+v", fs)
+	}
+	p, err := w.d.Preview(ctx, fs[0])
+	if err != nil || !p.CanFix || !strings.Contains(strings.Join(p.Lines, " "), "untracked") {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if j := w.fix(t, fs[0], doRemove); j.State != "done" || fmt.Sprint(w.radarr.calls) != "[remove 1]" {
+		t.Fatalf("%+v %v", j, w.radarr.calls)
+	}
+}
+
+func TestOtherHealthIsReportedWithItsLink(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.state.health = []arr.Health{{Source: "IndexerCheck", Type: "warning", Message: "no indexers", WikiURL: "https://wiki/x"}}
+	w.run(t)
+	fs := w.open(t, KindHealth)
+	if len(fs) != 1 || Fixable(fs[0].Kind, fs[0].Subject) || !strings.Contains(fs[0].Detail, "https://wiki/x") {
+		t.Fatalf("%+v", fs)
 	}
 }

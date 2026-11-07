@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
@@ -344,15 +345,37 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 	return out, nil
 }
 
+var removedID = regexp.MustCompile(`tmdbid (\d+)`)
+
 func (s *snapshot) health() []storage.Finding {
+	movies := map[string]arr.Movie{}
+	for _, m := range s.movies {
+		movies[fmt.Sprint(m.TmdbID)] = m
+	}
 	var out []storage.Finding
-	for name, st := range map[string]arrState{"radarr": s.radarr, "sonarr": s.sonarr} {
+	for name, st := range map[string]arrState{appRadarr: s.radarr, appSonarr: s.sonarr} {
 		for _, h := range st.health {
 			severity := note
 			if h.Type == "error" {
 				severity = problem
 			}
-			out = append(out, storage.Finding{Subject: name + ":" + h.Source + ":" + h.Message, Title: name + ": " + h.Source, Severity: severity, Detail: h.Message})
+			// One warning can name several movies, and each needs its own decision.
+			if h.Source == "RemovedMovieCheck" {
+				for _, id := range removedID.FindAllStringSubmatch(h.Message, -1) {
+					if m, ok := movies[id[1]]; ok {
+						out = append(out, storage.Finding{
+							Subject: removedPrefix + id[1], Title: fmt.Sprintf("%s (%d)", m.Title, m.Year), Severity: severity,
+							Detail: "TMDb removed this movie, so Radarr warns about it.", Data: encode(fixData{App: appRadarr, ArrID: m.ID, HasFile: m.HasFile}),
+						})
+					}
+				}
+				continue
+			}
+			detail := h.Message
+			if h.WikiURL != "" {
+				detail += " See " + h.WikiURL
+			}
+			out = append(out, storage.Finding{Subject: name + ":" + h.Source + ":" + h.Message, Title: name + ": " + h.Source, Severity: severity, Detail: detail})
 		}
 	}
 	return out
@@ -368,15 +391,40 @@ func (s *snapshot) missing() []storage.Finding {
 		if !m.Monitored {
 			detail = "Released, unmonitored and has no file, so nothing will fetch it."
 		}
-		out = append(out, storage.Finding{Subject: fmt.Sprintf("movie:%d", m.TmdbID), Title: fmt.Sprintf("%s (%d)", m.Title, m.Year), Severity: note, Detail: detail})
+		out = append(out, storage.Finding{
+			Subject: fmt.Sprintf("movie:%d", m.TmdbID), Title: fmt.Sprintf("%s (%d)", m.Title, m.Year), Severity: note, Detail: detail,
+			Data: encode(fixData{App: appRadarr, ArrID: m.ID, Monitored: m.Monitored}),
+		})
 	}
+	empty := map[int64]bool{}
 	for _, sr := range s.series {
 		if sr.Statistics.EpisodeFileCount == 0 {
-			out = append(out, storage.Finding{Subject: fmt.Sprintf("series:%d", sr.TvdbID), Title: sr.Title, Severity: note, Detail: "In Sonarr with no files."})
+			empty[sr.ID] = true
+			out = append(out, storage.Finding{
+				Subject: fmt.Sprintf("series:%d", sr.TvdbID), Title: sr.Title, Severity: note, Detail: "In Sonarr with no files.",
+				Data: encode(fixData{App: appSonarr, ArrID: sr.ID}),
+			})
 		}
 	}
-	if n := s.sonarr.missing; n > 0 {
-		out = append(out, storage.Finding{Subject: "episodes", Title: fmt.Sprintf("%d missing episodes", n), Severity: note, Detail: "Monitored and aired, with no file. Series with no files at all are listed on their own."})
+	// A series with no files at all is already listed, so its episodes aren't.
+	bySeries := map[int64][]arr.MissingEpisode{}
+	for _, e := range s.missingEpisodes {
+		if !empty[e.SeriesID] {
+			bySeries[e.SeriesID] = append(bySeries[e.SeriesID], e)
+		}
+	}
+	for id, eps := range bySeries {
+		var ids []int64
+		var names []string
+		for _, e := range eps {
+			ids = append(ids, e.ID)
+			names = append(names, fmt.Sprintf("S%02dE%02d %s", e.SeasonNumber, e.EpisodeNumber, e.Title))
+		}
+		list := episodeList(names)
+		out = append(out, storage.Finding{
+			Subject: fmt.Sprintf("episodes:%d", id), Title: fmt.Sprintf("%s: %d missing", eps[0].Series.Title, len(eps)), Severity: note,
+			Detail: list + ". Monitored and aired, with no file.", Data: encode(fixData{App: appSonarr, ArrID: id, Episodes: ids, OldName: list}),
+		})
 	}
 	return out
 }
@@ -473,11 +521,21 @@ func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Find
 		if (r.Type == "movie" && movies[r.TmdbID]) || (r.Type == "tv" && (series[r.TvdbID.Int64] || seriesTmdb[r.TmdbID])) {
 			continue
 		}
+		detail := "Requested in Seerr"
+		if r.Requesters != "" {
+			detail += " by " + strings.ReplaceAll(r.Requesters, ",", ", ")
+		}
+		if r.RequestedAt != 0 {
+			detail += " on " + time.Unix(r.RequestedAt, 0).UTC().Format("2006-01-02")
+		}
+		detail += ", and nothing has it."
 		title, err := d.Seerr.Title(ctx, r.Type, r.TmdbID)
 		if err != nil || title == "" {
-			title = fmt.Sprintf("%s %d", r.Type, r.TmdbID) // TMDb may have dropped it
+			// TMDb dropped it, and Seerr stores only the ID, so there's no name left to show.
+			title = fmt.Sprintf("unknown %s (TMDB %d)", r.Type, r.TmdbID)
+			detail += " TMDb no longer has this ID, so its name is gone."
 		}
-		out = append(out, storage.Finding{Subject: fmt.Sprint(r.MediaID), Title: title, Severity: note, Detail: "Requested in Seerr, and nothing has it.", Data: encode(fixData{MediaID: r.MediaID})})
+		out = append(out, storage.Finding{Subject: fmt.Sprint(r.MediaID), Title: title, Severity: note, Detail: detail, Data: encode(fixData{MediaID: r.MediaID})})
 	}
 	return out, nil
 }

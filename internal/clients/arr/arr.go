@@ -78,6 +78,7 @@ type Health struct {
 	Source  string `json:"source"`
 	Type    string `json:"type"` // "ok", "notice", "warning" or "error"
 	Message string `json:"message"`
+	WikiURL string `json:"wikiUrl"`
 }
 
 // Health lists what the app itself reports as wrong.
@@ -99,11 +100,6 @@ func (c *Client) total(ctx context.Context, path string) (int, error) {
 // BlocklistSize counts blocked releases.
 func (c *Client) BlocklistSize(ctx context.Context) (int, error) {
 	return c.total(ctx, "/api/v3/blocklist?pageSize=1")
-}
-
-// MissingCount counts monitored, released items with no file.
-func (c *Client) MissingCount(ctx context.Context) (int, error) {
-	return c.total(ctx, "/api/v3/wanted/missing?pageSize=1&monitored=true")
 }
 
 // MediaManagement is the part of those settings the doctor checks.

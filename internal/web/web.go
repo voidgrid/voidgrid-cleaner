@@ -710,6 +710,7 @@ func (s *Server) doctorApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	var fixes []storage.QueuedFix
 	for _, v := range r.PostForm["id"] {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -728,15 +729,13 @@ func (s *Server) doctorApply(w http.ResponseWriter, r *http.Request) {
 		if choice == "" && doctor.NeedsChoice(f.Kind) {
 			continue // left as it is
 		}
-		queued, err := s.DB.QueueFix(r.Context(), id, choice, u.Name)
-		if err != nil {
-			log.Printf("web: queue fix: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if queued {
-			s.DB.Audit(r.Context(), u.Name, "doctor fix approved", f.Title, choice)
-		}
+		fixes = append(fixes, storage.QueuedFix{FindingID: id, Title: f.Title, Choice: choice})
+	}
+	// The whole batch or none of it, even if the browser gives up waiting.
+	if err := s.DB.QueueFixes(context.WithoutCancel(r.Context()), u.Name, fixes); err != nil {
+		log.Printf("web: queue fixes: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
 }

@@ -36,6 +36,10 @@ func (d *Doctor) previewArr(ctx context.Context, p *Preview, data fixData) error
 		return d.previewUntracked(ctx, p, data)
 	case KindNotAccepted:
 		return d.previewImport(ctx, p, data)
+	case KindMissing:
+		d.previewMissing(p, data)
+	case KindHealth:
+		d.previewRemovedMovie(p, data)
 	case KindSettings:
 		p.CanFix = true
 		p.Lines = []string{"In Radarr, turn on Delete empty folders and turn off Create empty movie folders.", "Movies you add get a folder when they're imported, not before."}
@@ -148,6 +152,10 @@ func (d *Doctor) applyArr(ctx context.Context, f storage.Finding, data fixData, 
 		return d.applyAdd(ctx, data, choice)
 	case KindNotAccepted:
 		return d.applyImport(ctx, data, choice)
+	case KindMissing:
+		return d.applyMissing(ctx, data, choice)
+	case KindHealth:
+		return d.applyRemovedMovie(ctx, data, choice)
 	}
 	return d.applyEmptyFolders(ctx)
 }
@@ -377,5 +385,5 @@ func (d *Doctor) sleep(ctx context.Context) error {
 }
 
 func isArrFix(f storage.Finding) bool {
-	return f.Kind == KindNaming || f.Kind == KindUntracked || f.Kind == KindNotAccepted || (f.Kind == KindSettings && !strings.HasPrefix(f.Subject, localPrefix))
+	return f.Kind == KindNaming || f.Kind == KindUntracked || f.Kind == KindNotAccepted || f.Kind == KindMissing || f.Kind == KindHealth || (f.Kind == KindSettings && !strings.HasPrefix(f.Subject, localPrefix))
 }

@@ -578,3 +578,24 @@ func TestPlaysBeforeARedAddDontCount(t *testing.T) {
 		t.Fatalf("%+v %v", eps, err)
 	}
 }
+
+func TestQueueFixesIsOneBatchAndLogsEach(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.SaveFindings(ctx, "naming", []Finding{{Subject: "a", Title: "A", Severity: "note"}, {Subject: "b", Title: "B", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := db.Findings(ctx, "open")
+	batch := []QueuedFix{{FindingID: fs[0].ID, Title: "A"}, {FindingID: fs[1].ID, Title: "B"}}
+	if err := db.QueueFixes(ctx, "me", batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueueFixes(ctx, "me", batch); err != nil { // already queued: no doubles
+		t.Fatal(err)
+	}
+	js, _ := db.RecentFixes(ctx, 10)
+	es, _ := db.AuditLog(ctx, "approved", 10, 0)
+	if len(js) != 2 || len(es) != 2 {
+		t.Fatalf("%d jobs, %d entries", len(js), len(es))
+	}
+}

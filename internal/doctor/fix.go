@@ -16,22 +16,25 @@ import (
 
 // fixData is what a finding carries for its fix.
 type fixData struct {
-	RatingKey string `json:"rating_key,omitempty"`
-	Section   string `json:"section,omitempty"`
-	Library   string `json:"library,omitempty"`
-	Type      string `json:"type,omitempty"` // "movie" or "show"
-	Agent     string `json:"agent,omitempty"`
-	WantID    string `json:"want_id,omitempty"`
-	ArrTitle  string `json:"arr_title,omitempty"`
-	ArrYear   int    `json:"arr_year,omitempty"`
-	App       string `json:"app,omitempty"` // "radarr" or "sonarr"
-	ArrID     int64  `json:"arr_id,omitempty"`
-	FileID    int64  `json:"file_id,omitempty"`
-	OldName   string `json:"old_name,omitempty"`
-	NewName   string `json:"new_name,omitempty"`
-	Folder    string `json:"folder,omitempty"`
-	Root      string `json:"root,omitempty"`
-	MediaID   int64  `json:"media_id,omitempty"`
+	RatingKey string  `json:"rating_key,omitempty"`
+	Section   string  `json:"section,omitempty"`
+	Library   string  `json:"library,omitempty"`
+	Type      string  `json:"type,omitempty"` // "movie" or "show"
+	Agent     string  `json:"agent,omitempty"`
+	WantID    string  `json:"want_id,omitempty"`
+	ArrTitle  string  `json:"arr_title,omitempty"`
+	ArrYear   int     `json:"arr_year,omitempty"`
+	App       string  `json:"app,omitempty"` // "radarr" or "sonarr"
+	ArrID     int64   `json:"arr_id,omitempty"`
+	FileID    int64   `json:"file_id,omitempty"`
+	OldName   string  `json:"old_name,omitempty"`
+	NewName   string  `json:"new_name,omitempty"`
+	Folder    string  `json:"folder,omitempty"`
+	Root      string  `json:"root,omitempty"`
+	MediaID   int64   `json:"media_id,omitempty"`
+	Monitored bool    `json:"monitored,omitempty"`
+	HasFile   bool    `json:"has_file,omitempty"`
+	Episodes  []int64 `json:"episodes,omitempty"`
 	// Resolution is what Plex measured, as Plex writes it.
 	Resolution string `json:"resolution,omitempty"`
 }
@@ -48,14 +51,15 @@ const localPrefix = "plex:local:"
 
 // Fixable reports whether the doctor can fix a finding.
 func Fixable(kind, subject string) bool {
-	return NeedsChoice(kind) || kind == KindReleaseTitle || kind == KindNaming ||
+	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted ||
+		kind == KindMissing || (kind == KindHealth && strings.HasPrefix(subject, removedPrefix)) || kind == KindReleaseTitle || kind == KindNaming ||
 		kind == KindStaleRequest || kind == KindEmptyFolder || kind == KindStrayFile ||
 		(kind == KindSettings && (strings.HasPrefix(subject, localPrefix) || subject == emptyFoldersSubject))
 }
 
 // NeedsChoice reports whether a kind's fix waits for the admin to pick an option.
 func NeedsChoice(kind string) bool {
-	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted
+	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted || kind == KindMissing || kind == KindHealth
 }
 
 // refreshChoice keeps the match and re-reads the item's metadata.

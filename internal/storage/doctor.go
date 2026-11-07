@@ -138,12 +138,16 @@ type UnmatchedRequest struct {
 	TvdbID          sql.NullInt64
 	Type            string
 	Status          int
+	Requesters      string // comma-separated names
+	RequestedAt     int64  // the first request, unix seconds
 }
 
 // UnmatchedRequests lists requests no library item matched, one per Seerr media.
 func (db *DB) UnmatchedRequests(ctx context.Context) ([]UnmatchedRequest, error) {
-	rows, err := db.QueryContext(ctx, `SELECT seerr_media_id, tmdb_id, tvdb_id, media_type, max(status) FROM requests
-		WHERE rating_key IS NULL GROUP BY seerr_media_id`)
+	rows, err := db.QueryContext(ctx, `SELECT r.seerr_media_id, r.tmdb_id, r.tvdb_id, r.media_type, max(r.status),
+			coalesce(group_concat(DISTINCT u.display_name), ''), min(r.created_at)
+		FROM requests r LEFT JOIN users u ON u.seerr_user_id = r.seerr_user_id
+		WHERE r.rating_key IS NULL GROUP BY r.seerr_media_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +155,7 @@ func (db *DB) UnmatchedRequests(ctx context.Context) ([]UnmatchedRequest, error)
 	var out []UnmatchedRequest
 	for rows.Next() {
 		var r UnmatchedRequest
-		if err := rows.Scan(&r.MediaID, &r.TmdbID, &r.TvdbID, &r.Type, &r.Status); err != nil {
+		if err := rows.Scan(&r.MediaID, &r.TmdbID, &r.TvdbID, &r.Type, &r.Status, &r.Requesters, &r.RequestedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -178,11 +182,49 @@ type AuditEntry struct {
 // title so the entry still reads after the item is gone. A failure is only
 // logged: the audit must never stop a deletion already under way.
 func (db *DB) Audit(ctx context.Context, who, action, item, detail string) {
-	if _, err := db.ExecContext(context.WithoutCancel(ctx), `INSERT INTO audit_log (at, who, action, item, detail)
-		VALUES (?, ?, ?, coalesce((SELECT title FROM media WHERE rating_key = ?), ?), ?)`,
-		time.Now().Unix(), who, action, item, item, detail); err != nil {
-		log.Printf("audit: %s %s: %v", action, item, err)
+	ctx = context.WithoutCancel(ctx)
+	at := time.Now().Unix()
+	var err error
+	// A busy database must not cost an entry: the audit log has to be complete.
+	for try := 0; try < auditTries; try++ {
+		if _, err = db.ExecContext(ctx, `INSERT INTO audit_log (at, who, action, item, detail)
+			VALUES (?, ?, ?, coalesce((SELECT title FROM media WHERE rating_key = ?), ?), ?)`,
+			at, who, action, item, item, detail); err == nil {
+			return
+		}
 	}
+	log.Printf("audit: lost %s %s: %v", action, item, err)
+}
+
+const auditTries = 4
+
+// QueuedFix is one fix to queue.
+type QueuedFix struct {
+	FindingID     int64
+	Title, Choice string
+}
+
+// QueueFixes queues a batch and logs each one, in one transaction: a few
+// hundred separate writes would hold up everything else on a slow disk.
+func (db *DB) QueueFixes(ctx context.Context, who string, fixes []QueuedFix) error {
+	now := time.Now().Unix()
+	return db.tx(ctx, func(tx *sql.Tx) error {
+		for _, f := range fixes {
+			queued, err := changed(tx.ExecContext(ctx, `INSERT INTO fix_jobs (finding_id, choice, who, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+				f.FindingID, f.Choice, who, now))
+			if err != nil {
+				return err
+			}
+			if !queued {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO audit_log (at, who, action, item, detail) VALUES (?, ?, 'doctor fix approved', ?, ?)`,
+				now, who, f.Title, f.Choice); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // AuditLog lists entries newest first, matching search if it's set.

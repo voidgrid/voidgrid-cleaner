@@ -34,9 +34,11 @@ func Open(path string) (*DB, error) {
 	}
 	q := url.Values{}
 	q.Add("_pragma", "foreign_keys(1)")
-	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "busy_timeout(15000)")
 	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "synchronous(FULL)")
+	// NORMAL is SQLite's advice for WAL: a power cut can lose the last few
+	// commits but never corrupts the file, and each commit skips a slow disk sync.
+	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_txlock", "immediate")
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
 
