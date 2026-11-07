@@ -45,9 +45,15 @@ type Server struct {
 	// DiscordKey and DiscordChannel accept Keep presses; nil turns them off.
 	DiscordKey     ed25519.PublicKey
 	DiscordChannel string
-	DB             *storage.DB
-	Seerr          *seerr.Client
-	PlexTV         *plex.TV
+	// DiscordAdminChannel takes stuck download buttons; "" turns them off.
+	DiscordAdminChannel string
+	// Downloads reads the download queues.
+	Downloads DownloadLister
+	// Space reports disks and the space-based queue for the admin page.
+	Space  SpaceReader
+	DB     *storage.DB
+	Seerr  *seerr.Client
+	PlexTV *plex.TV
 	// PinWait is how long the Plex callback waits for plex.tv to report
 	// the pin approved (it can lag the redirect slightly).
 	PinWait time.Duration
@@ -79,6 +85,21 @@ type page struct {
 	Ephemeral []storage.EphemeralShow
 	Doctor    *doctorPage
 	Log       *logPage
+	Queue     []doctor.QueueRow
+	Admin     *adminPage
+}
+
+type adminPage struct {
+	Requests   []storage.ChangeRequest
+	Users      []storage.User
+	Disks      []doctor.Disk
+	SpaceQueue []storage.SpaceItem
+	SpaceError string
+}
+
+// SpaceReader reports disks and the space-based queue.
+type SpaceReader interface {
+	Space(context.Context) ([]doctor.Disk, []storage.SpaceItem, error)
 }
 
 // Previewer builds fix previews.
@@ -183,7 +204,7 @@ func init() {
 		"fixable": doctor.Fixable,
 		"gb":      func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log", "downloads", "admin"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -225,6 +246,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/poster/{ratingKey}", s.poster)
 		r.Get("/ephemeral", s.ephemeral)
 		r.Post("/ephemeral/{ratingKey}/join", s.joinEphemeral)
+		r.Post("/ephemeral/{ratingKey}/leave", s.leaveEphemeral)
+		r.Post("/library/item/{ratingKey}/ask/{kind}", s.ask)
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)
 			r.Get("/sync", s.syncStatus)
@@ -238,6 +261,12 @@ func (s *Server) Router() http.Handler {
 			r.Post("/doctor/{id}/dismiss", s.setFinding("dismissed"))
 			r.Post("/doctor/{id}/open", s.setFinding("open"))
 			r.Get("/log", s.auditLog)
+			r.Get("/downloads", s.downloads)
+			r.Get("/admin", s.admin)
+			r.Post("/admin/requests/{id}/approve", s.decide(true))
+			r.Post("/admin/requests/{id}/deny", s.decide(false))
+			r.Post("/admin/users/{id}/auto", s.setAutoApprove(true))
+			r.Post("/admin/users/{id}/approval", s.setAutoApprove(false))
 			r.Post("/settings", s.saveSettings)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			r.Post("/users/discord/{id}", s.setDiscordUser)
@@ -354,6 +383,9 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 		Data      struct {
 			CustomID string `json:"custom_id"`
 		} `json:"data"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 		Member struct {
 			Nick string `json:"nick"`
 			User struct {
@@ -381,17 +413,27 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"type": 1})
 		return
 	}
-	id, isKeep := discord.ParseKeep(in.Data.CustomID)
-	show, isJoin := discord.ParseJoin(in.Data.CustomID)
-	if in.Type != component || (!isKeep && !isJoin) || in.ChannelID != s.DiscordChannel || in.Member.User.ID == "" {
-		private("That can't be done here.")
-		return
-	}
 	name := in.Member.Nick
 	for _, n := range []string{in.Member.User.GlobalName, in.Member.User.Username} {
 		if name == "" {
 			name = n
 		}
+	}
+	// Download buttons change things, so they live only in the admin channel
+	// and only a linked admin can press them. Keep and Add me stay in the main one.
+	if fid, action, isDownload := discord.ParseDownload(in.Data.CustomID); isDownload {
+		if in.Type != component || s.DiscordAdminChannel == "" || in.ChannelID != s.DiscordAdminChannel || in.Member.User.ID == "" {
+			private("That can't be done here.")
+			return
+		}
+		s.downloadButton(r, reply, private, fid, action, in.Member.User.ID, name, in.Message.Content)
+		return
+	}
+	id, isKeep := discord.ParseKeep(in.Data.CustomID)
+	show, isJoin := discord.ParseJoin(in.Data.CustomID)
+	if in.Type != component || (!isKeep && !isJoin) || in.ChannelID != s.DiscordChannel || in.Member.User.ID == "" {
+		private("That can't be done here.")
+		return
 	}
 	if isJoin {
 		title, result, err := s.DB.JoinFromDiscord(r.Context(), show, in.Member.User.ID, name)
@@ -615,6 +657,20 @@ func (s *Server) ephemeral(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "ephemeral", page{User: &u, Ephemeral: shows})
 }
 
+func (s *Server) leaveEphemeral(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "ratingKey")
+	left, err := s.DB.RemoveWatcher(r.Context(), key, userFrom(r.Context()).SeerrID)
+	if err != nil {
+		log.Printf("web: leave ephemeral: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if left {
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "leave ephemeral", key, "")
+	}
+	http.Redirect(w, r, "/ephemeral", http.StatusSeeOther)
+}
+
 func (s *Server) joinEphemeral(w http.ResponseWriter, r *http.Request) {
 	// False means it stopped being ephemeral; the list shows that.
 	key := chi.URLParam(r, "ratingKey")
@@ -657,15 +713,26 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other), Fixes: fixes}
 	for _, l := range doctor.Labels {
-		g := findingGroup{Label: l.Label}
-		for _, f := range fs {
-			if f.Kind == l.Kind {
+		// Naming splits by kind of rename, so tick all is safe on the harmless ones.
+		labels := []string{l.Label}
+		if l.Kind == doctor.KindNaming {
+			labels = nil
+			for _, n := range doctor.NamingGroups {
+				labels = append(labels, l.Label+": "+n)
+			}
+		}
+		for _, label := range labels {
+			g := findingGroup{Label: label}
+			for _, f := range fs {
+				if f.Kind != l.Kind || (l.Kind == doctor.KindNaming && l.Label+": "+doctor.NamingGroup(f) != label) {
+					continue
+				}
 				g.Findings = append(g.Findings, f)
 				g.Fixable = g.Fixable || doctor.Fixable(f.Kind, f.Subject)
 			}
-		}
-		if len(g.Findings) > 0 {
-			p.Groups = append(p.Groups, g)
+			if len(g.Findings) > 0 {
+				p.Groups = append(p.Groups, g)
+			}
 		}
 	}
 	render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
@@ -787,6 +854,200 @@ func (s *Server) auditLog(w http.ResponseWriter, r *http.Request) {
 		p.More = "/log?" + url.Values{"q": {q}, "offset": {strconv.Itoa(offset + logPageSize)}}.Encode()
 	}
 	render(w, http.StatusOK, "log", page{User: &u, Log: p})
+}
+
+// downloadButton queues a stuck download's fix pressed in Discord.
+func (s *Server) downloadButton(r *http.Request, reply func(any), private func(string), findingID int64, action, discordID, discordName, content string) {
+	who, admin, err := s.DB.DiscordAdmin(r.Context(), discordID, discordName)
+	if err != nil {
+		log.Printf("web: discord admin: %v", err)
+		private("Something went wrong, so nothing changed. Tell an admin.")
+		return
+	}
+	if !admin {
+		private("Only an admin whose Discord account is linked on the users page can do that.")
+		return
+	}
+	label := ""
+	for _, c := range doctor.DownloadChoices {
+		if c.Value == action {
+			label = c.Label
+		}
+	}
+	f, found, err := s.DB.Finding(r.Context(), findingID)
+	if err != nil {
+		log.Printf("web: finding: %v", err)
+		private("Something went wrong, so nothing changed. Tell an admin.")
+		return
+	}
+	if label == "" || !found || f.Kind != doctor.KindStuck || f.State != "open" {
+		private("That download isn't stuck any more.")
+		return
+	}
+	if err := s.DB.QueueFixes(context.WithoutCancel(r.Context()), who, []storage.QueuedFix{{FindingID: f.ID, Title: f.Title, Choice: action}}); err != nil {
+		log.Printf("web: queue fix: %v", err)
+		private("Something went wrong, so nothing changed. Tell an admin.")
+		return
+	}
+	// Drop the buttons so nobody presses a second one.
+	reply(map[string]any{"type": 7, "data": map[string]any{
+		"content": content + "\n" + who + " chose " + label + ". The result goes in the log.", "components": []any{},
+		"allowed_mentions": map[string]any{"parse": []string{}},
+	}})
+}
+
+// DownloadLister reads the download queues.
+type DownloadLister interface {
+	Downloads(context.Context) ([]doctor.QueueRow, error)
+}
+
+func (s *Server) downloads(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	rows, err := s.Downloads.Downloads(r.Context())
+	p := page{User: &u, Queue: rows}
+	if err != nil {
+		log.Printf("web: downloads: %v", err)
+		p.Error = "Couldn't read a download queue: " + err.Error()
+	}
+	render(w, http.StatusOK, "downloads", p)
+}
+
+// ask records what a user wants done with something they requested.
+// Ephemeral needs no approval; keep and delete wait for an admin unless the
+// user skips approval. Space-based isn't something a user can ask for.
+func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	key, kind := chi.URLParam(r, "ratingKey"), chi.URLParam(r, "kind")
+	section, typ, found, err := s.DB.MediaInfo(r.Context(), key)
+	if err != nil {
+		log.Printf("web: media info: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	mine, err := s.DB.IsRequester(r.Context(), key, u.SeerrID)
+	if err != nil {
+		log.Printf("web: requester: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !mine && !u.IsAdmin {
+		http.Error(w, "only someone who requested it can ask", http.StatusForbidden)
+		return
+	}
+	if kind == storage.StatusEphemeral {
+		status, deleting, err := s.DB.ItemState(r.Context(), key)
+		if err != nil {
+			log.Printf("web: item state: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		// Only from normal: it mustn't override an admin's keep or space-based,
+		// or stop a deletion that's on its way without an admin seeing it.
+		if typ != "show" || status != storage.StatusNormal || deleting {
+			http.Error(w, "only a show with no status and no deletion on its way can be made ephemeral; ask to keep it instead", http.StatusConflict)
+			return
+		}
+		if err := s.DB.SetItemStatus(r.Context(), key, storage.StatusEphemeral, u.SeerrID); err != nil {
+			log.Printf("web: set status: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.DB.Audit(r.Context(), u.Name, "set status", key, storage.StatusEphemeral)
+		backToCard(w, r, section, key)
+		return
+	}
+	result, err := s.DB.Ask(r.Context(), u, key, kind, s.DryRun)
+	if err != nil {
+		log.Printf("web: ask: %v", err)
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.DB.Audit(r.Context(), u.Name, "ask to "+kind, key, result)
+	backToCard(w, r, section, key)
+}
+
+func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	p := &adminPage{}
+	var err error
+	if p.Requests, err = s.DB.PendingRequests(r.Context()); err == nil {
+		p.Users, err = s.DB.Users(r.Context())
+	}
+	if err != nil {
+		log.Printf("web: admin: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if s.Space != nil {
+		if p.Disks, p.SpaceQueue, err = s.Space.Space(r.Context()); err != nil {
+			p.SpaceError = "Couldn't read disk space: " + err.Error()
+		}
+	}
+	render(w, http.StatusOK, "admin", page{User: &u, Admin: p})
+}
+
+func (s *Server) decide(approve bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u := userFrom(r.Context())
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		title, kind, err := s.DB.Decide(r.Context(), id, approve, u, s.DryRun)
+		action := "deny request"
+		if approve {
+			action = "approve request"
+		}
+		if err != nil {
+			log.Printf("web: %s: %v", action, err)
+			// A 200 with the reason: the request stays waiting.
+			s.renderAdminError(w, r, u, err.Error())
+			return
+		}
+		s.DB.Audit(r.Context(), u.Name, action, title, kind)
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	}
+}
+
+func (s *Server) renderAdminError(w http.ResponseWriter, r *http.Request, u storage.User, msg string) {
+	reqs, err := s.DB.PendingRequests(r.Context())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	users, err := s.DB.Users(r.Context())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, "admin", page{User: &u, Error: msg, Admin: &adminPage{Requests: reqs, Users: users}})
+}
+
+func (s *Server) setAutoApprove(on bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		found, err := s.DB.SetAutoApprove(r.Context(), id, on)
+		if err != nil {
+			log.Printf("web: auto approve: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "skip approval", strconv.FormatInt(id, 10), strconv.FormatBool(on))
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	}
 }
 
 // recentDeletions is how many finished deletions the status screen shows.

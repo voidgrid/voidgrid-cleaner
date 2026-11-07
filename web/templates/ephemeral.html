@@ -10,7 +10,7 @@
     <tr>
         <td>{{.Title}}</td>
         <td>{{if .Watchers}}{{.Watchers}}{{else}}<span class="muted">nobody</span>{{end}}</td>
-        <td>{{if .Joined}}<span class="muted">you're on it</span>{{else}}<form class="inline-form" method="post" action="/ephemeral/{{.RatingKey}}/join"><button type="submit" aria-label="add me to {{.Title}}">add me</button></form>{{end}}</td>
+        <td>{{if .Added}}<form class="inline-form" method="post" action="/ephemeral/{{.RatingKey}}/leave"><button type="submit" aria-label="leave {{.Title}}">leave</button></form>{{else if .Joined}}<span class="muted">you requested it</span>{{else}}<form class="inline-form" method="post" action="/ephemeral/{{.RatingKey}}/join"><button type="submit" aria-label="add me to {{.Title}}">add me</button></form>{{end}}</td>
     </tr>
     {{end}}
     </tbody>

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
@@ -14,8 +13,6 @@ import (
 
 const (
 	spaceCheck = time.Hour
-	// sameFSSlack allows for writes between the Radarr and Sonarr answers.
-	sameFSSlack = 1 << 30
 )
 
 // checkSpace schedules space-based items, oldest watched first, on each disk
@@ -92,23 +89,8 @@ func (w *Worker) checkSpace(ctx context.Context) error {
 	return nil
 }
 
-// diskFor finds the disk holding path: the longest mount that contains it.
-func diskFor(disks []arr.DiskSpace, path string) (arr.DiskSpace, bool) {
-	var best arr.DiskSpace
-	found := false
-	for _, d := range disks {
-		mount := strings.TrimSuffix(d.Path, "/") + "/"
-		if path != "" && d.TotalSpace > 0 && strings.HasPrefix(path+"/", mount) && (!found || len(d.Path) > len(best.Path)) {
-			best, found = d, true
-		}
-	}
-	return best, found
-}
-
-// sameFS spots one filesystem seen through two mounts, such as a movies and a
-// TV folder on one pool, so its overage isn't counted once for each. Two
-// matching disks would be taken as one, which only ever deletes less.
-func sameFS(a, b arr.DiskSpace) bool {
-	diff := a.FreeSpace - b.FreeSpace
-	return a.TotalSpace == b.TotalSpace && diff > -sameFSSlack && diff < sameFSSlack
-}
+// The disk helpers live in arr, shared with the doctor's space card.
+var (
+	diskFor = arr.DiskFor
+	sameFS  = arr.SameFS
+)

@@ -16,25 +16,27 @@ import (
 
 // fixData is what a finding carries for its fix.
 type fixData struct {
-	RatingKey string  `json:"rating_key,omitempty"`
-	Section   string  `json:"section,omitempty"`
-	Library   string  `json:"library,omitempty"`
-	Type      string  `json:"type,omitempty"` // "movie" or "show"
-	Agent     string  `json:"agent,omitempty"`
-	WantID    string  `json:"want_id,omitempty"`
-	ArrTitle  string  `json:"arr_title,omitempty"`
-	ArrYear   int     `json:"arr_year,omitempty"`
-	App       string  `json:"app,omitempty"` // "radarr" or "sonarr"
-	ArrID     int64   `json:"arr_id,omitempty"`
-	FileID    int64   `json:"file_id,omitempty"`
-	OldName   string  `json:"old_name,omitempty"`
-	NewName   string  `json:"new_name,omitempty"`
-	Folder    string  `json:"folder,omitempty"`
-	Root      string  `json:"root,omitempty"`
-	MediaID   int64   `json:"media_id,omitempty"`
-	Monitored bool    `json:"monitored,omitempty"`
-	HasFile   bool    `json:"has_file,omitempty"`
-	Episodes  []int64 `json:"episodes,omitempty"`
+	RatingKey  string  `json:"rating_key,omitempty"`
+	Section    string  `json:"section,omitempty"`
+	Library    string  `json:"library,omitempty"`
+	Type       string  `json:"type,omitempty"` // "movie" or "show"
+	Agent      string  `json:"agent,omitempty"`
+	WantID     string  `json:"want_id,omitempty"`
+	ArrTitle   string  `json:"arr_title,omitempty"`
+	ArrYear    int     `json:"arr_year,omitempty"`
+	App        string  `json:"app,omitempty"` // "radarr" or "sonarr"
+	ArrID      int64   `json:"arr_id,omitempty"`
+	FileID     int64   `json:"file_id,omitempty"`
+	OldName    string  `json:"old_name,omitempty"`
+	NewName    string  `json:"new_name,omitempty"`
+	Folder     string  `json:"folder,omitempty"`
+	Root       string  `json:"root,omitempty"`
+	MediaID    int64   `json:"media_id,omitempty"`
+	Monitored  bool    `json:"monitored,omitempty"`
+	HasFile    bool    `json:"has_file,omitempty"`
+	Episodes   []int64 `json:"episodes,omitempty"`
+	DownloadID string  `json:"download_id,omitempty"`
+	QueueIDs   []int64 `json:"queue_ids,omitempty"`
 	// Resolution is what Plex measured, as Plex writes it.
 	Resolution string `json:"resolution,omitempty"`
 }
@@ -52,15 +54,17 @@ const localPrefix = "plex:local:"
 // Fixable reports whether the doctor can fix a finding.
 func Fixable(kind, subject string) bool {
 	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted ||
-		kind == KindMissing || (kind == KindHealth && strings.HasPrefix(subject, removedPrefix)) || kind == KindReleaseTitle || kind == KindNaming ||
+		kind == KindMissing || kind == KindStuck || (kind == KindHealth && strings.HasPrefix(subject, removedPrefix)) || kind == KindReleaseTitle || kind == KindNaming ||
 		kind == KindStaleRequest || kind == KindEmptyFolder || kind == KindStrayFile ||
 		(kind == KindSettings && (strings.HasPrefix(subject, localPrefix) || subject == emptyFoldersSubject))
 }
 
 // NeedsChoice reports whether a kind's fix waits for the admin to pick an option.
 func NeedsChoice(kind string) bool {
-	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted || kind == KindMissing || kind == KindHealth
+	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted || kind == KindMissing || kind == KindHealth || kind == KindStuck
 }
+
+func jsonDecode(s string, v any) error { return json.Unmarshal([]byte(s), v) }
 
 // refreshChoice keeps the match and re-reads the item's metadata.
 const refreshChoice = "refresh"
@@ -101,6 +105,9 @@ func (d *Doctor) Preview(ctx context.Context, f storage.Finding) (Preview, error
 	if isDiskFix(f) {
 		d.previewDisk(&p, data)
 		return p, nil
+	}
+	if f.Kind == KindStuck {
+		return p, d.previewStuck(ctx, &p, data)
 	}
 	if f.Kind == KindSettings {
 		p.CanFix = true
@@ -191,6 +198,9 @@ func (d *Doctor) apply(ctx context.Context, f storage.Finding, choice string) (s
 	}
 	if isDiskFix(f) {
 		return d.applyDisk(ctx, f, data)
+	}
+	if f.Kind == KindStuck {
+		return d.applyStuck(ctx, data, choice)
 	}
 	if f.Kind == KindSettings {
 		return d.applyLocalMetadata(ctx, data)

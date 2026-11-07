@@ -1,0 +1,56 @@
+{{define "content"}}
+<h1>admin</h1>
+<div data-live>
+{{with .Admin}}
+<section class="card-panel">
+    <h2>requests <span class="muted">({{len .Requests}})</span></h2>
+    {{if .Requests}}
+    <p class="muted">users asking for keep or delete on what they requested. approving one settles its item: anything else asked about it is denied.</p>
+    <table>
+        <thead><tr><th>item</th><th>asks for</th><th>who</th><th>when</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+        <tbody>
+        {{range .Requests}}
+        <tr>
+            <td>{{.Title}}{{if .Conflict}} <span class="badge">conflict</span>{{end}}</td>
+            <td>{{.Kind}}</td>
+            <td>{{.Who}}</td>
+            <td>{{when .CreatedAt}}</td>
+            <td><div class="actions">
+                <form class="inline-form" method="post" action="/admin/requests/{{.ID}}/approve"><button type="submit" aria-label="approve {{.Kind}} for {{.Title}}">approve</button></form>
+                <form class="inline-form" method="post" action="/admin/requests/{{.ID}}/deny"><button type="submit" aria-label="deny {{.Kind}} for {{.Title}}">deny</button></form>
+            </div></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="muted">nothing waiting.</p>
+    {{end}}
+</section>
+
+<section class="card-panel">
+    <h2>space</h2>
+    {{if .SpaceError}}<p class="flash-error">{{.SpaceError}}</p>{{end}}
+    {{range .Disks}}<p>{{.Path}}: {{.Used}}% used, {{gb .Free}} free <span class="muted">(limit {{.Limit}}%)</span></p>{{end}}
+    {{if .SpaceQueue}}
+    <p class="muted">space-based items, in the order they'd go:</p>
+    <ol>{{range .SpaceQueue}}<li>{{.Title}} <span class="muted">{{gb .SizeBytes}}</span></li>{{end}}</ol>
+    {{else}}
+    <p class="muted">nothing is space-based.</p>
+    {{end}}
+</section>
+
+<section class="card-panel">
+    <h2>skips approval</h2>
+    <p class="muted">these users' keep and delete asks apply at once, unless someone else's ask on the same item is waiting.</p>
+    <table>
+        <tbody>
+        {{range .Users}}{{if not .IsAdmin}}
+        <tr><td>{{.Name}}</td><td><form class="inline-form" method="post" action="/admin/users/{{.SeerrID}}/{{if .AutoApprove}}approval{{else}}auto{{end}}"><button type="submit">{{if .AutoApprove}}needs approval again{{else}}skip approval{{end}}</button></form>{{if .AutoApprove}} <span class="badge">skips approval</span>{{end}}</td></tr>
+        {{end}}{{end}}
+        </tbody>
+    </table>
+</section>
+{{end}}
+</div>
+{{end}}

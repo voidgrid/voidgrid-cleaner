@@ -147,6 +147,15 @@ func run() error {
 		DryRun:  worker.DryRun,
 	}
 	s.Previews = checkup
+	s.Downloads = checkup
+	s.Space = checkup
+	s.DiscordAdminChannel = cfg.DiscordAdminChannel
+	if worker.AdminChannel {
+		if bot, ok := worker.Notify.(*discord.Client); ok {
+			checkup.Alerts = bot
+		}
+	}
+	go checkup.WatchDownloads(stop, time.Minute)
 	go checkup.FixLoop(stop, 2*time.Second)
 	syncer.After = func(ctx context.Context) { checkup.Run(ctx) }
 	s.DoctorNow = func() { go checkup.Run(stop) }

@@ -47,6 +47,7 @@ const (
 
 // Labels names each kind, in the order the screen lists them.
 var Labels = []struct{ Kind, Label string }{
+	{KindStuck, "stuck download"},
 	{KindPathNotMounted, "path not mounted"},
 	{KindPathNotVerified, "path not verified"},
 	{KindPathMismatch, "path mismatch"},
@@ -80,6 +81,9 @@ type (
 		Health(context.Context) ([]arr.Health, error)
 		BlocklistSize(context.Context) (int, error)
 		MediaManagement(context.Context) (arr.MediaManagement, error)
+		Queue(context.Context) ([]arr.QueueRecord, error)
+		RemoveQueue(ctx context.Context, ids []int64, blocklist, skipRedownload bool) error
+		DownloadImports(context.Context, string) ([]arr.DownloadFile, error)
 		commander
 	}
 	RadarrAPI interface {
@@ -139,6 +143,10 @@ type Doctor struct {
 	FixWait time.Duration
 	// DryRun makes a stray file fix report instead of deleting.
 	DryRun bool
+	// Alerts posts stuck downloads; nil posts nothing.
+	Alerts DownloadAlerter
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
 
 	mu sync.Mutex
 }

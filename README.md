@@ -120,6 +120,13 @@ verified only when a file the other services list really exists there, and the d
 as managed and that are verified. A path a service uses and this app can't see is reported, and you can dismiss it if it
 isn't needed.
 
+### Downloads
+
+The **downloads** page shows Radarr's and Sonarr's queues together, with each item's real reason when it's stuck. A download
+stuck for 15 minutes appears on the doctor page with its fixes: import it as Radarr or Sonarr identified it, remove it,
+blocklist only, or blocklist and search. With `VGC_DISCORD_ADMIN_CHANNEL` set, it's also posted there with buttons for remove
+and both blocklists; only an admin whose Discord account is linked on the users page can press them.
+
 ### Log
 
 The **log** page shows who decided what: status changes, deletions and each of their steps, Keep and Add me presses, and
@@ -197,6 +204,16 @@ Library pages start with 32 items and load more as you scroll. Posters are
 fetched in the background, so they're usually on disk before anyone needs them. Open pages check
 for changes every 5 seconds, so a Keep pressed in Discord shows up by itself.
 Everything also works without JavaScript, as plain links and forms.
+
+### Requests
+
+Everyone else works on what they requested, from the item's card: **make ephemeral** applies at once, because anyone can add
+themselves to an ephemeral show, and only from no status, so it never overrides an admin. **ask to keep** and **ask to
+delete** wait on the **admin** page, where admins approve or deny them. Approving one settles the item: any other ask on it is
+denied. Conflicting asks are marked. Space-based is for admins only. Admins can let a user skip approval; their asks then
+apply at once, unless someone else's ask on the same item is waiting.
+
+The admin page also shows each disk holding a library and the space-based items in the order they'd go.
 
 ### Who can sign in
 

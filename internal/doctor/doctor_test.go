@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
@@ -25,6 +26,12 @@ type fakeArr struct {
 
 	commands []map[string]any
 	status   string
+
+	queue         []arr.QueueRecord
+	queueErr      error
+	removed       []string
+	clearOnRemove bool
+	imports       []arr.DownloadFile
 }
 
 func (f *fakeArr) RootFolders(context.Context) ([]arr.RootFolder, error) {
@@ -39,6 +46,19 @@ func (f *fakeArr) BlocklistSize(context.Context) (int, error) { return f.state.b
 
 func (f *fakeArr) MediaManagement(context.Context) (arr.MediaManagement, error) {
 	return f.state.settings, nil
+}
+
+func (f *fakeArr) Queue(context.Context) ([]arr.QueueRecord, error) { return f.queue, f.queueErr }
+func (f *fakeArr) RemoveQueue(_ context.Context, ids []int64, blocklist, skip bool) error {
+	f.removed = append(f.removed, fmt.Sprintf("%v blocklist=%v skip=%v", ids, blocklist, skip))
+	if f.clearOnRemove {
+		f.queue = nil
+	}
+	return nil
+}
+
+func (f *fakeArr) DownloadImports(context.Context, string) ([]arr.DownloadFile, error) {
+	return f.imports, nil
 }
 
 func (f *fakeArr) Command(_ context.Context, body map[string]any) (int64, error) {
@@ -1383,5 +1403,238 @@ func TestOtherHealthIsReportedWithItsLink(t *testing.T) {
 	fs := w.open(t, KindHealth)
 	if len(fs) != 1 || Fixable(fs[0].Kind, fs[0].Subject) || !strings.Contains(fs[0].Detail, "https://wiki/x") {
 		t.Fatalf("%+v", fs)
+	}
+}
+
+type fakeAlerts struct{ posted []string }
+
+func (f *fakeAlerts) DownloadAlert(_ context.Context, text string, id int64) error {
+	f.posted = append(f.posted, fmt.Sprintf("%d %s", id, text))
+	return nil
+}
+
+// stuckPack is a season pack whose import is blocked, as two queue records.
+func stuckPack() []arr.QueueRecord {
+	mk := func(id int64, ep int) arr.QueueRecord {
+		q := arr.QueueRecord{ID: id, DownloadID: "SAB1", Title: "Show.S01.1080p", TrackedDownloadStatus: "warning", TrackedDownloadState: "importBlocked"}
+		q.StatusMessages = append(q.StatusMessages, struct {
+			Title    string   `json:"title"`
+			Messages []string `json:"messages"`
+		}{Title: "Show.S01.1080p", Messages: []string{"Not an upgrade for existing episode file(s)"}})
+		q.Series = &struct {
+			Title string `json:"title"`
+		}{"Show"}
+		q.Episode = &struct {
+			SeasonNumber  int `json:"seasonNumber"`
+			EpisodeNumber int `json:"episodeNumber"`
+		}{1, ep}
+		return q
+	}
+	healthy := arr.QueueRecord{ID: 9, DownloadID: "OK1", Title: "Fine", TrackedDownloadStatus: "ok", TrackedDownloadState: "downloading", Size: 100, Sizeleft: 25}
+	return []arr.QueueRecord{mk(1, 1), mk(2, 2), healthy}
+}
+
+func TestStuckDownloadsAreOneFindingPerDownload(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fs := w.open(t, KindStuck)
+	if len(fs) != 1 || fs[0].Title != "Show (2 episodes)" || !strings.Contains(fs[0].Detail, "Not an upgrade") {
+		t.Fatalf("%+v", fs)
+	}
+	rows, err := w.d.Downloads(ctx)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	for _, r := range rows {
+		if (r.Release == "Fine") == (r.FindingID != 0) {
+			t.Fatalf("only the stuck one is fixable: %+v", r)
+		}
+		if r.Release == "Fine" && r.Progress != 75 {
+			t.Fatalf("%+v", r)
+		}
+	}
+}
+
+func TestStuckDownloadAlertsOnceAfterAWhile(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	alerts := &fakeAlerts{}
+	w.d.Alerts = alerts
+	now := time.Now()
+	w.d.Now = func() time.Time { return now }
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts.posted) != 0 {
+		t.Fatal("posted a download that only just stuck")
+	}
+	now = now.Add(stuckFor + time.Minute)
+	for range 2 {
+		if err := w.d.CheckDownloads(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(alerts.posted) != 1 || !strings.Contains(alerts.posted[0], "Not an upgrade") || !strings.Contains(alerts.posted[0], "Show.S01.1080p") {
+		t.Fatalf("%q", alerts.posted)
+	}
+	// Unstuck, then stuck again later: that's news again.
+	w.sonarr.queue = nil
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(stuckFor + time.Minute)
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts.posted) != 2 {
+		t.Fatalf("%q", alerts.posted)
+	}
+}
+
+func TestQueueOutageChangesNothing(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	w.sonarr.queueErr = errors.New("sonarr down")
+	if err := w.d.CheckDownloads(ctx); err == nil {
+		t.Fatal("no error")
+	}
+	if fs := w.open(t, KindStuck); len(fs) != 1 {
+		t.Fatalf("an outage resolved a stuck download: %+v", fs)
+	}
+}
+
+func (w *world) stuck(t *testing.T) storage.Finding {
+	t.Helper()
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return w.open(t, KindStuck)[0]
+}
+
+func TestStuckDownloadRemovals(t *testing.T) {
+	for choice, want := range map[string]string{
+		doRemoveDownload: "[1 2] blocklist=false skip=true",
+		doBlocklist:      "[1 2] blocklist=true skip=true",
+		doBlocklistAgain: "[1 2] blocklist=true skip=false",
+	} {
+		w := newWorld(t)
+		f := w.stuck(t)
+		w.sonarr.clearOnRemove = true
+		if j := w.fix(t, f, choice); j.State != "done" {
+			t.Fatalf("%s: %+v", choice, j)
+		}
+		if fmt.Sprint(w.sonarr.removed) != "["+want+"]" {
+			t.Fatalf("%s: %v", choice, w.sonarr.removed)
+		}
+	}
+}
+
+func TestStuckDownloadStillQueuedFails(t *testing.T) {
+	w := newWorld(t)
+	f := w.stuck(t)
+	if j := w.fix(t, f, doRemoveDownload); j.State != "failed" || !strings.Contains(j.Detail, "still in the queue") {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func importFile(withEpisodes bool) arr.DownloadFile {
+	f := arr.DownloadFile{Path: "/dl/Show.S01E01.mkv", FolderName: "Show.S01", Quality: map[string]any{"quality": map[string]any{"id": 3}}}
+	f.Series = &struct {
+		ID int64 `json:"id"`
+	}{ID: 4}
+	if withEpisodes {
+		f.Episodes = []struct {
+			ID int64 `json:"id"`
+		}{{ID: 77}}
+	}
+	f.Rejections = []struct {
+		Reason string `json:"reason"`
+	}{{Reason: "Not an upgrade"}}
+	return f
+}
+
+func TestStuckDownloadImport(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	f := w.stuck(t)
+	w.sonarr.imports = []arr.DownloadFile{importFile(true), {Path: "/dl/info.nfo"}}
+	p, err := w.d.Preview(ctx, f)
+	if err != nil || p.Choices[0].Value != doImport || !strings.Contains(strings.Join(p.Lines, " "), "Not an upgrade") {
+		t.Fatalf("%+v %v", p, err)
+	}
+	w.sonarr.queue = nil // the import takes it out of the queue
+	if j := w.fix(t, f, doImport); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	c := w.sonarr.commands[0]
+	files := c["files"].([]map[string]any)
+	if c["name"] != "ManualImport" || len(files) != 1 || files[0]["seriesId"] != int64(4) || fmt.Sprint(files[0]["episodeIds"]) != "[77]" || files[0]["downloadId"] != "SAB1" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestStuckDownloadWithUnknownFilesOffersNoImport(t *testing.T) {
+	w := newWorld(t)
+	f := w.stuck(t)
+	w.sonarr.imports = []arr.DownloadFile{importFile(false)}
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p.Choices {
+		if c.Value == doImport {
+			t.Fatal("offered an import of files nobody identified")
+		}
+	}
+	if len(p.Choices) != 3 {
+		t.Fatalf("%+v", p.Choices)
+	}
+}
+
+func TestNamingGroups(t *testing.T) {
+	for want, names := range map[string][2]string{
+		"capital letters only":        {"A Bit Of Advice WEBDL-720p.mkv", "A Bit of Advice WEBDL-720p.mkv"},
+		"punctuation only":            {"August Rush (2007) Bluray-1080p.mkv", "August Rush - (2007) - Bluray-1080p.mkv"},
+		"part number only":            {"S01E05 - Now and Then (2) WEBDL-1080p.mkv", "S01E05 - Now and Then WEBDL-1080p.mkv"},
+		"quality label only":          {"S08E08 - Renewal Bluray-1080p.mkv", "S08E08 - Renewal Bluray-1080p Remux.mkv"},
+		"episode title changed":       {"S02E16 - The Ascent WEBDL-1080p.mkv", "S02E16 - Ascension WEBDL-1080p.mkv"},
+		"movie title or year changed": {"Nausicaa - (1984) - Bluray-1080p.mkv", "Warriors of the Wind - (1984) - Bluray-1080p.mkv"},
+	} {
+		app := appSonarr
+		if want == "movie title or year changed" || want == "punctuation only" {
+			app = appRadarr
+		}
+		f := storage.Finding{Data: encode(fixData{App: app, OldName: names[0], NewName: names[1]})}
+		if got := NamingGroup(f); got != want {
+			t.Fatalf("%v: got %q, want %q", names, got, want)
+		}
+	}
+}
+
+func TestSpaceCardSkipsTheAppsOwnRoot(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.radarr.state.disks = []arr.DiskSpace{{Path: "/", FreeSpace: 1, TotalSpace: 100}, {Path: w.root, FreeSpace: 70, TotalSpace: 100}}
+	w.run(t)
+	if err := w.d.DB.SaveLibraryPaths(ctx, []storage.LibraryPath{{Path: w.root, UsedBy: "radarr", Media: true}, {Path: "/srv/elsewhere", UsedBy: "plex", Media: true}}); err != nil {
+		t.Fatal(err)
+	}
+	disks, _, err := w.d.Space(ctx)
+	if err != nil || len(disks) != 1 || disks[0].Path != w.root || disks[0].Used != 30 {
+		t.Fatalf("%+v %v", disks, err)
 	}
 }

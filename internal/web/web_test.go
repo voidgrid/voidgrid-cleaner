@@ -408,8 +408,8 @@ func TestSetStatus(t *testing.T) {
 	ctx := context.Background()
 	get(t, c, app.URL+"/login/plex")
 	get(t, c, app.URL+"/login/plex/callback")
-	if b := body(t, get(t, c, app.URL+"/library/1")); strings.Contains(b, "/library/item/") {
-		t.Fatal("non-admin sees status buttons")
+	if b := body(t, get(t, c, app.URL+"/library/1")); strings.Contains(b, `/library/item/10/keep"`) || !strings.Contains(b, `/library/item/10/ask/keep"`) {
+		t.Fatal("non-admin should see ask buttons, not admin ones")
 	}
 	// Refused even on his own item, and on someone else's, by direct POST.
 	for _, key := range []string{"10", "20"} {
@@ -1104,5 +1104,264 @@ func TestStatusShowsEphemeralWaits(t *testing.T) {
 	b := body(t, get(t, c, app.URL+"/"))
 	if !strings.Contains(b, "ephemeral shows waiting on someone") || !strings.Contains(b, "<td>Admins Show</td><td>1</td><td>bob</td>") {
 		t.Fatalf("%s", b)
+	}
+}
+
+type fakeDownloads struct{}
+
+func (fakeDownloads) Downloads(context.Context) ([]doctor.QueueRow, error) {
+	return []doctor.QueueRow{{App: "sonarr", Item: "Show (2 episodes)", Release: "Show.S01.1080p", State: "importBlocked", Reason: "Not an upgrade", FindingID: 5}}, nil
+}
+
+func TestDownloadsPage(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	s.Downloads = fakeDownloads{}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	b := body(t, get(t, c, app.URL+"/downloads"))
+	if !strings.Contains(b, "Show (2 episodes)") || !strings.Contains(b, "Not an upgrade") || !strings.Contains(b, `href="/doctor/preview?id=5"`) {
+		t.Fatalf("%s", b)
+	}
+}
+
+func TestDownloadButtonsAreForLinkedAdminsInTheAdminChannel(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	s.DiscordKey, s.DiscordChannel, s.DiscordAdminChannel = pub, "55", "66"
+	if err := s.DB.SaveFindings(ctx, doctor.KindStuck, []storage.Finding{{Subject: "sonarr:SAB1", Title: "Show", Severity: "problem"}}); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := s.DB.Findings(ctx, "open")
+	custom := fmt.Sprintf("dl:%d:blocklist-search", fs[0].ID)
+	press := func(channel, user string) string {
+		payload := fmt.Sprintf(`{"type":3,"channel_id":%q,"data":{"custom_id":%q},"message":{"content":"Stuck"},"member":{"user":{"id":%q,"username":"u"}}}`, channel, custom, user)
+		req, _ := http.NewRequest(http.MethodPost, app.URL+"/discord/interactions", strings.NewReader(payload))
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req.Header.Set("X-Signature-Timestamp", ts)
+		req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(ed25519.Sign(priv, []byte(ts+payload))))
+		resp, err := (&http.Client{Transport: c.Transport}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body(t, resp)
+	}
+	queued := func() int {
+		js, _ := s.DB.RecentFixes(ctx, 5)
+		return len(js)
+	}
+	if b := press("55", "900"); !strings.Contains(b, "can't be done here") || queued() != 0 {
+		t.Fatalf("main channel: %s", b)
+	}
+	if b := press("66", "900"); !strings.Contains(b, "Only an admin") || queued() != 0 {
+		t.Fatalf("unlinked: %s", b)
+	}
+	if ok, err := s.DB.SetDiscordUser(ctx, "900", 2); err != nil || !ok { // bob, not an admin
+		t.Fatal(ok, err)
+	}
+	if b := press("66", "900"); !strings.Contains(b, "Only an admin") || queued() != 0 {
+		t.Fatalf("non-admin: %s", b)
+	}
+	if ok, err := s.DB.SetDiscordUser(ctx, "900", 1); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	b := press("66", "900")
+	if !strings.Contains(b, `"type":7`) || !strings.Contains(b, "admin chose Blocklist and search") || queued() != 1 {
+		t.Fatalf("admin: %s", b)
+	}
+	js, _ := s.DB.RecentFixes(ctx, 1)
+	if js[0].Choice != "blocklist-search" || js[0].Who != "admin" {
+		t.Fatalf("%+v", js[0])
+	}
+}
+
+func TestLeaveEphemeral(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, who didn't request show 20
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	postForm(t, c, app.URL+"/ephemeral/20/join", url.Values{})
+	if b := body(t, get(t, c, app.URL+"/ephemeral")); !strings.Contains(b, "/ephemeral/20/leave") {
+		t.Fatalf("no leave button: %s", b)
+	}
+	postForm(t, c, app.URL+"/ephemeral/20/leave", url.Values{})
+	b := body(t, get(t, c, app.URL+"/ephemeral"))
+	if !strings.Contains(b, "/ephemeral/20/join") || strings.Contains(b, "admin, bob") {
+		t.Fatalf("still on it: %s", b)
+	}
+	if es, _ := s.DB.AuditLog(ctx, "leave", 5, 0); len(es) != 1 {
+		t.Fatalf("%+v", es)
+	}
+}
+
+func TestRequesterCantLeave(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}}) // admin requested 20
+	postForm(t, c, app.URL+"/ephemeral/20/leave", url.Values{})
+	b := body(t, get(t, c, app.URL+"/ephemeral"))
+	if !strings.Contains(b, "you requested it") || strings.Contains(b, "/ephemeral/20/leave") {
+		t.Fatalf("%s", b)
+	}
+	if shows, _ := s.DB.EphemeralShows(ctx, storage.User{SeerrID: 1}); shows[0].Watchers != "admin" {
+		t.Fatalf("%+v", shows)
+	}
+}
+
+func TestAskFlow(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob, who requested item 10 and not 20
+	seedLibrary(t, s)
+	ctx := context.Background()
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := postForm(t, c, app.URL+"/library/item/20/ask/keep", url.Values{}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("asked about someone else's item: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/10/ask/space_based", url.Values{}); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("space-based is admin only: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/10/ask/ephemeral", url.Values{}); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a movie can't be ephemeral: %d", resp.StatusCode)
+	}
+	postForm(t, c, app.URL+"/library/item/10/ask/delete", url.Values{})
+	postForm(t, c, app.URL+"/library/item/10/ask/keep", url.Values{}) // asking again replaces it
+	reqs, _ := s.DB.PendingRequests(ctx)
+	if len(reqs) != 1 || reqs[0].Kind != "keep" || reqs[0].Who != "bob" {
+		t.Fatalf("%+v", reqs)
+	}
+	if st, _, _ := s.DB.ItemState(ctx, "10"); st != storage.StatusNormal {
+		t.Fatal("applied without approval:", st)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/1")); !strings.Contains(b, "keep requested") {
+		t.Fatalf("card doesn't show the ask: %s", b)
+	}
+	if resp := get(t, c, app.URL+"/admin"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin admin page: %d", resp.StatusCode)
+	}
+}
+
+func TestRequesterMakesShowEphemeralDirectly(t *testing.T) {
+	app, c, s := newTestApp(t, 200) // bob
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if err := s.DB.ReplaceRequests(ctx, []storage.Request{
+		{SeerrRequestID: 1, SeerrUserID: 2, MediaType: "movie", RatingKey: sql.NullString{String: "10", Valid: true}},
+		{SeerrRequestID: 9, SeerrUserID: 2, MediaType: "tv", RatingKey: sql.NullString{String: "20", Valid: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := postForm(t, c, app.URL+"/library/item/20/ask/ephemeral", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("%d", resp.StatusCode)
+	}
+	if st, _, _ := s.DB.ItemState(ctx, "20"); st != storage.StatusEphemeral {
+		t.Fatal(st)
+	}
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/ask/ephemeral", url.Values{}); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("overrode an admin's keep: %d", resp.StatusCode)
+	}
+	if st, _, _ := s.DB.ItemState(ctx, "20"); st != storage.StatusKeep {
+		t.Fatal(st)
+	}
+}
+
+func TestAdminSettlesRequests(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if err := s.DB.UpsertUser(ctx, storage.User{SeerrID: 3, Name: "cat"}); err != nil {
+		t.Fatal(err)
+	}
+	bob, cat := storage.User{SeerrID: 2, Name: "bob"}, storage.User{SeerrID: 3, Name: "cat"}
+	if _, err := s.DB.Ask(ctx, bob, "10", storage.AskDelete, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Ask(ctx, cat, "10", storage.AskKeep, true); err != nil {
+		t.Fatal(err)
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	b := body(t, get(t, c, app.URL+"/admin"))
+	if strings.Count(b, "conflict") < 2 || !strings.Contains(b, "admin (2)") {
+		t.Fatalf("%s", b)
+	}
+	reqs, _ := s.DB.PendingRequests(ctx)
+	var keepID int64
+	for _, r := range reqs {
+		if r.Kind == "keep" {
+			keepID = r.ID
+		}
+	}
+	if resp := postForm(t, c, app.URL+"/admin/requests/"+strconv.FormatInt(keepID, 10)+"/approve", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("%d", resp.StatusCode)
+	}
+	if st, _, _ := s.DB.ItemState(ctx, "10"); st != storage.StatusKeep {
+		t.Fatal(st)
+	}
+	if reqs, _ := s.DB.PendingRequests(ctx); len(reqs) != 0 {
+		t.Fatalf("the other ask wasn't settled: %+v", reqs)
+	}
+	if es, _ := s.DB.AuditLog(ctx, "approve request", 5, 0); len(es) != 1 {
+		t.Fatalf("%+v", es)
+	}
+}
+
+func TestApprovedDeleteOfAKeptItemStaysWaiting(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	if _, err := s.DB.Ask(ctx, storage.User{SeerrID: 2, Name: "bob"}, "10", storage.AskDelete, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SetItemStatus(ctx, "10", storage.StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	reqs, _ := s.DB.PendingRequests(ctx)
+	resp := postForm(t, c, app.URL+"/admin/requests/"+strconv.FormatInt(reqs[0].ID, 10)+"/approve", url.Values{})
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "set to keep") {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	if reqs, _ := s.DB.PendingRequests(ctx); len(reqs) != 1 {
+		t.Fatal("a failed approval dropped the request")
+	}
+}
+
+func TestSkipApproval(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if resp := postForm(t, c, app.URL+"/admin/users/2/auto", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("%d", resp.StatusCode)
+	}
+	bob := storage.User{SeerrID: 2, Name: "bob", AutoApprove: true}
+	if r, err := s.DB.Ask(ctx, bob, "10", storage.AskKeep, true); err != nil || r != storage.AskApplied {
+		t.Fatal(r, err)
+	}
+	if st, _, _ := s.DB.ItemState(ctx, "10"); st != storage.StatusKeep {
+		t.Fatal(st)
+	}
+	// Someone else is waiting on the item: an admin settles it, even for bob.
+	if err := s.DB.SetItemStatus(ctx, "10", storage.StatusNormal, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Ask(ctx, storage.User{SeerrID: 1, Name: "admin"}, "10", storage.AskDelete, true); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := s.DB.Ask(ctx, bob, "10", storage.AskKeep, true); err != nil || r != storage.AskPending {
+		t.Fatal(r, err)
 	}
 }

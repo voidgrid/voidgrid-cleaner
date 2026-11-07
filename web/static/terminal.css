@@ -82,6 +82,13 @@ th {
     color: var(--fg-bright);
 }
 
+/* A card on the admin page. */
+.card-panel {
+    border: 1px solid var(--border);
+    padding: 0 1rem 0.5rem;
+    margin: 1rem 0;
+}
+
 /* On a phone, a table too wide for the screen scrolls on its own, so the page
    doesn't, and words stay whole. Only very long names break. */
 @media (max-width: 40rem) {

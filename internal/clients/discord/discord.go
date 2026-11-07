@@ -22,6 +22,8 @@ const maxSkew = 5 * time.Minute
 const (
 	keepPrefix = "keep:"
 	joinPrefix = "join:"
+	// downloadPrefix buttons act on a stuck download; only admins may press them.
+	downloadPrefix = "dl:"
 )
 
 // Client posts to one channel as the bot.
@@ -146,6 +148,38 @@ func Verify(key ed25519.PublicKey, sigHex, timestamp string, body []byte, now ti
 	}
 	d := now.Sub(time.Unix(ts, 0))
 	return d < maxSkew && d > -maxSkew
+}
+
+// DownloadAlert posts a stuck download to the admin channel with buttons for
+// what can be done without choosing anything more.
+func (c *Client) DownloadAlert(ctx context.Context, text string, findingID int64) error {
+	if c.AdminChannel == "" {
+		return errors.New("discord: no admin channel set")
+	}
+	id := strconv.FormatInt(findingID, 10)
+	row := []any{
+		map[string]any{"type": 2, "style": 4, "label": "Remove", "custom_id": downloadPrefix + id + ":remove"},
+		map[string]any{"type": 2, "style": 2, "label": "Blocklist only", "custom_id": downloadPrefix + id + ":blocklist"},
+		map[string]any{"type": 2, "style": 1, "label": "Blocklist and search", "custom_id": downloadPrefix + id + ":blocklist-search"},
+	}
+	return c.postTo(ctx, c.AdminChannel, map[string]any{
+		"content": text, "allowed_mentions": noMentions,
+		"components": []any{map[string]any{"type": 1, "components": row}},
+	})
+}
+
+// ParseDownload returns the finding and action a download button carries.
+func ParseDownload(customID string) (findingID int64, action string, ok bool) {
+	s, ok := strings.CutPrefix(customID, downloadPrefix)
+	if !ok {
+		return 0, "", false
+	}
+	idPart, action, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0, "", false
+	}
+	id, err := strconv.ParseInt(idPart, 10, 64)
+	return id, action, err == nil
 }
 
 // ParseJoin returns the show an Add me button belongs to.

@@ -132,10 +132,13 @@ func TestSpaceSkipsIgnoredLibraries(t *testing.T) {
 
 func TestDiskFor(t *testing.T) {
 	disks := []arr.DiskSpace{{Path: "/", TotalSpace: 1}, {Path: "/data", TotalSpace: 1}, {Path: "/data/media", TotalSpace: 1}, {Path: "/data/media2/x", TotalSpace: 1}}
-	for path, want := range map[string]string{"/data/media/a": "/data/media", "/data/media2/b": "/data", "/other": "/"} {
+	for path, want := range map[string]string{"/data/media/a": "/data/media", "/data/media2/b": "/data"} {
 		if d, ok := diskFor(disks, path); !ok || d.Path != want {
 			t.Fatalf("%s: got %q %v, want %s", path, d.Path, ok, want)
 		}
+	}
+	if _, ok := diskFor(disks, "/other"); ok {
+		t.Fatal("matched the app's own container root")
 	}
 	if _, ok := diskFor(disks, ""); ok {
 		t.Fatal("an unknown path matched a disk")

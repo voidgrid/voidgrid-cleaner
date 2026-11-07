@@ -109,6 +109,9 @@ func (w *Worker) adminDigest(ctx context.Context, d storage.Digest) string {
 	if d.NewFindings > 0 {
 		lines = append(lines, fmt.Sprintf("Doctor: %d new, %d open.", d.NewFindings, d.OpenFindings))
 	}
+	if d.PendingAsks > 0 {
+		lines = append(lines, fmt.Sprintf("%d requests waiting on the admin page.", d.PendingAsks))
+	}
 	if d.UnlinkedDisc+d.UnlinkedPlex > 0 {
 		lines = append(lines, fmt.Sprintf("Unlinked: %d Discord users, %d Plex accounts.", d.UnlinkedDisc, d.UnlinkedPlex))
 	}

@@ -10,6 +10,7 @@
   let refreshAgain = false;
   let posting = false;
   let loadingMore = false;
+  let held = false;
 
   async function fetchPage(url) {
     const res = await fetch(url);
@@ -74,7 +75,12 @@
       if (cards()) swapMore(doc);
       const area = liveArea();
       const nextArea = doc.querySelector("[data-live]");
-      if (area && nextArea && area.innerHTML !== nextArea.innerHTML) area.innerHTML = nextArea.innerHTML;
+      // Ticks for a batch would be lost, so hold the update until they're cleared.
+      if (area?.querySelector("input[type=checkbox][form]:checked")) {
+        held = true;
+      } else if (area && nextArea && area.innerHTML !== nextArea.innerHTML) {
+        area.innerHTML = nextArea.innerHTML;
+      }
       if (openCard) {
         const el = document.getElementById(openCard);
         if (el && !el.matches(":popover-open")) el.showPopover();
@@ -171,6 +177,12 @@
       const boxes = [...e.target.nextElementSibling.querySelectorAll("input[type=checkbox]")];
       const on = boxes.some((b) => !b.checked);
       boxes.forEach((b) => { b.checked = on; });
+    }
+  });
+  document.addEventListener("change", () => {
+    if (held && !liveArea()?.querySelector("input[type=checkbox][form]:checked")) {
+      held = false;
+      refresh().catch(() => {});
     }
   });
   document.addEventListener("visibilitychange", poll);

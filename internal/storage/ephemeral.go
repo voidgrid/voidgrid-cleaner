@@ -22,16 +22,20 @@ const watcherNames = `coalesce((SELECT group_concat(name, ', ') FROM (
 type EphemeralShow struct {
 	RatingKey, Title, Watchers string
 	Joined                     bool
+	// Added means they added themselves, so they can leave; a requester stays on.
+	Added bool
 }
 
 // EphemeralShows lists every ephemeral show, for anyone signed in: joining
 // one you didn't request means being able to see it.
 func (db *DB) EphemeralShows(ctx context.Context, u User) ([]EphemeralShow, error) {
 	rows, err := db.QueryContext(ctx, `SELECT m.rating_key, m.title, `+watcherNames+`,
-			EXISTS (SELECT 1 FROM `+showWatchers+` w WHERE w.rating_key = m.rating_key AND w.seerr_user_id = ?)
+			EXISTS (SELECT 1 FROM `+showWatchers+` w WHERE w.rating_key = m.rating_key AND w.seerr_user_id = ?),
+			EXISTS (SELECT 1 FROM ephemeral_watchers e WHERE e.rating_key = m.rating_key AND e.seerr_user_id = ?)
+				AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.rating_key = m.rating_key AND r.seerr_user_id = ?)
 		FROM media m JOIN item_status st ON st.rating_key = m.rating_key AND st.status = ?
 		JOIN sections s ON s.section_key = m.section_key AND s.ignored = 0
-		ORDER BY m.title COLLATE NOCASE`, u.SeerrID, StatusEphemeral)
+		ORDER BY m.title COLLATE NOCASE`, u.SeerrID, u.SeerrID, u.SeerrID, StatusEphemeral)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +43,7 @@ func (db *DB) EphemeralShows(ctx context.Context, u User) ([]EphemeralShow, erro
 	var out []EphemeralShow
 	for rows.Next() {
 		var e EphemeralShow
-		if err := rows.Scan(&e.RatingKey, &e.Title, &e.Watchers, &e.Joined); err != nil {
+		if err := rows.Scan(&e.RatingKey, &e.Title, &e.Watchers, &e.Joined, &e.Added); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -72,6 +76,12 @@ func (db *DB) AddWatcher(ctx context.Context, ratingKey string, seerrID int64) (
 		return addWatcher(ctx, tx, ratingKey, seerrID)
 	})
 	return ok && err == nil, err
+}
+
+// RemoveWatcher takes a user off a show they added themselves to. Episodes
+// stop waiting for them. Requesters can't leave this way.
+func (db *DB) RemoveWatcher(ctx context.Context, ratingKey string, seerrID int64) (bool, error) {
+	return changed(db.ExecContext(ctx, `DELETE FROM ephemeral_watchers WHERE rating_key = ? AND seerr_user_id = ?`, ratingKey, seerrID))
 }
 
 // What became of an Add me press.

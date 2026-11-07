@@ -170,3 +170,17 @@ func TestPostAndAdminChannel(t *testing.T) {
 		t.Fatal(paths, err)
 	}
 }
+
+func TestParseDownload(t *testing.T) {
+	if id, a, ok := ParseDownload("dl:12:blocklist-search"); !ok || id != 12 || a != "blocklist-search" {
+		t.Fatal(id, a, ok)
+	}
+	for _, bad := range []string{"keep:1", "dl:x:remove", "dl:12"} {
+		if _, _, ok := ParseDownload(bad); ok {
+			t.Fatal(bad)
+		}
+	}
+	if err := (&Client{Channel: "55"}).DownloadAlert(context.Background(), "x", 1); err == nil {
+		t.Fatal("posted download buttons with no admin channel")
+	}
+}

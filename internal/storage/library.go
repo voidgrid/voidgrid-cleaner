@@ -332,6 +332,7 @@ type LibraryItem struct {
 	DeletionID  int64  // pending deletion, 0 if none
 	DeleteAfter int64  // its time, 0 until the notification is confirmed
 	KeptBy      string // who set the status from Discord, "" if it was set in the app
+	MyAsk       string // what the viewer asked for and is waiting on, \"\" if nothing
 	Total       int    // everything matching the filter, ignoring Limit
 }
 
@@ -416,10 +417,11 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 				JOIN discord_users du ON du.discord_id = st.set_by_discord
 				LEFT JOIN users u ON u.seerr_user_id = du.seerr_user_id
 				WHERE st.rating_key = m.rating_key), ''),
+			coalesce((SELECT c.kind FROM change_requests c WHERE c.rating_key = m.rating_key AND c.seerr_user_id = ? AND c.state = 'pending'), ''),
 			count(*) OVER ()
 		FROM media m LEFT JOIN deletions d ON d.rating_key = m.rating_key AND d.state IN ('scheduled', 'notified', 'executing')
 		WHERE m.section_key = ?`
-	args := []any{sectionKey}
+	args := []any{u.SeerrID, sectionKey}
 	if !u.IsAdmin {
 		q += ` AND ` + owned
 		args = append(args, u.SeerrID)
@@ -474,7 +476,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		var it LibraryItem
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.Total); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.MyAsk, &it.Total); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
@@ -522,4 +524,12 @@ func (db *DB) Thumb(ctx context.Context, ratingKey string) (string, error) {
 		return "", nil
 	}
 	return t, err
+}
+
+// ItemState says an item's status and whether a deletion is on its way.
+func (db *DB) ItemState(ctx context.Context, ratingKey string) (status string, deleting bool, err error) {
+	err = db.QueryRowContext(ctx, `SELECT coalesce((SELECT status FROM item_status WHERE rating_key = ?), 'normal'),
+		EXISTS (SELECT 1 FROM deletions WHERE (rating_key = ? OR parent_key = ?) AND state IN ('scheduled', 'notified', 'executing'))`,
+		ratingKey, ratingKey, ratingKey).Scan(&status, &deleting)
+	return status, deleting, err
 }

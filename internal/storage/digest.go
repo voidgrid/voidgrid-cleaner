@@ -64,6 +64,7 @@ type Digest struct {
 	NewFindings  int
 	OpenFindings int
 	SyncErrors   []SyncStatus
+	PendingAsks  int
 	UnlinkedDisc int
 	UnlinkedPlex int
 	SpaceQueue   int
@@ -95,6 +96,7 @@ func (db *DB) DigestData(ctx context.Context, since, now time.Time, dryRun bool)
 		{&d.NewFindings, `SELECT count(*) FROM findings WHERE state = 'open' AND first_seen >= ?`, []any{since.Unix()}},
 		{&d.OpenFindings, `SELECT count(*) FROM findings WHERE state = 'open'`, nil},
 		{&d.UnlinkedDisc, `SELECT count(*) FROM discord_users WHERE seerr_user_id IS NULL`, nil},
+		{&d.PendingAsks, `SELECT count(*) FROM change_requests WHERE state = 'pending'`, nil},
 	} {
 		if err := db.QueryRowContext(ctx, q.sql, q.args...).Scan(q.dst); err != nil {
 			return d, err

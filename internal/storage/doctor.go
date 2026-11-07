@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"strconv"
@@ -18,15 +19,24 @@ type Finding struct {
 	State               string
 	FirstSeen, LastSeen int64
 	Data                string // JSON for the fix
+	Alerted             bool   // posted to Discord
 }
 
 // SaveFindings records one kind's complete result: new findings open, gone
 // ones resolve, and dismissed ones stay dismissed.
 func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error {
 	now := time.Now().Unix()
+	subjects := make([]string, 0, len(fs))
+	for _, f := range fs {
+		subjects = append(subjects, f.Subject)
+	}
+	still, err := json.Marshal(subjects)
+	if err != nil {
+		return err
+	}
 	return db.tx(ctx, func(tx *sql.Tx) error {
-		// Resolve first; the upsert reopens whatever is still there.
-		if _, err := tx.ExecContext(ctx, `UPDATE findings SET state = 'resolved' WHERE kind = ? AND state = 'open'`, kind); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE findings SET state = 'resolved'
+			WHERE kind = ? AND state = 'open' AND subject NOT IN (SELECT value FROM json_each(?))`, kind, string(still)); err != nil {
 			return err
 		}
 		for _, f := range fs {
@@ -37,7 +47,9 @@ func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error
 			if _, err := tx.ExecContext(ctx, `INSERT INTO findings (kind, subject, title, detail, severity, first_seen, last_seen, data)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (kind, subject) DO UPDATE SET title = excluded.title, detail = excluded.detail, severity = excluded.severity, data = excluded.data,
-					last_seen = excluded.last_seen, state = CASE state WHEN 'resolved' THEN 'open' ELSE state END`,
+					last_seen = excluded.last_seen, alerted = CASE state WHEN 'resolved' THEN 0 ELSE alerted END,
+					first_seen = CASE state WHEN 'resolved' THEN excluded.first_seen ELSE first_seen END,
+					state = CASE state WHEN 'resolved' THEN 'open' ELSE state END`,
 				kind, f.Subject, f.Title, f.Detail, f.Severity, now, now, data); err != nil {
 				return err
 			}
@@ -48,7 +60,7 @@ func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error
 
 // Findings lists findings in a state, worst first within each kind.
 func (db *DB) Findings(ctx context.Context, state string) ([]Finding, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data FROM findings
+	rows, err := db.QueryContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data, alerted FROM findings
 		WHERE state = ? ORDER BY kind, title COLLATE NOCASE`, state)
 	if err != nil {
 		return nil, err
@@ -57,7 +69,7 @@ func (db *DB) Findings(ctx context.Context, state string) ([]Finding, error) {
 	var out []Finding
 	for rows.Next() {
 		var f Finding
-		if err := rows.Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data); err != nil {
+		if err := rows.Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data, &f.Alerted); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -338,8 +350,8 @@ func (db *DB) PruneAudit(ctx context.Context, now time.Time) error {
 
 // Finding returns one finding; found is false if there's no such ID.
 func (db *DB) Finding(ctx context.Context, id int64) (f Finding, found bool, err error) {
-	err = db.QueryRowContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data FROM findings WHERE id = ?`, id).
-		Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data)
+	err = db.QueryRowContext(ctx, `SELECT id, kind, subject, title, detail, severity, state, first_seen, last_seen, data, alerted FROM findings WHERE id = ?`, id).
+		Scan(&f.ID, &f.Kind, &f.Subject, &f.Title, &f.Detail, &f.Severity, &f.State, &f.FirstSeen, &f.LastSeen, &f.Data, &f.Alerted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return f, false, nil
 	}
@@ -439,4 +451,27 @@ func (db *DB) HasActiveDeletion(ctx context.Context, ratingKey string) (bool, er
 func (db *DB) ForgetSeerrMedia(ctx context.Context, mediaID int64) error {
 	_, err := db.ExecContext(ctx, `DELETE FROM requests WHERE seerr_media_id = ?`, mediaID)
 	return err
+}
+
+// MarkFindingAlerted records that a finding was posted to Discord. It's
+// cleared if the finding resolves and comes back, so a new episode posts again.
+func (db *DB) MarkFindingAlerted(ctx context.Context, id int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE findings SET alerted = 1 WHERE id = ?`, id)
+	return err
+}
+
+// DiscordAdmin returns the Seerr user a Discord user is linked to, and
+// whether they're an admin. It records the Discord user, so they show on the
+// users page to be linked. name is "" if they aren't linked.
+func (db *DB) DiscordAdmin(ctx context.Context, discordID, discordName string) (name string, admin bool, err error) {
+	if _, err := db.ExecContext(ctx, `INSERT INTO discord_users (discord_id, name, first_seen) VALUES (?, ?, ?)
+		ON CONFLICT (discord_id) DO UPDATE SET name = excluded.name`, discordID, discordName, time.Now().Unix()); err != nil {
+		return "", false, err
+	}
+	err = db.QueryRowContext(ctx, `SELECT u.display_name, u.is_admin FROM discord_users d JOIN users u ON u.seerr_user_id = d.seerr_user_id
+		WHERE d.discord_id = ?`, discordID).Scan(&name, &admin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return name, admin, err
 }
