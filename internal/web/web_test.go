@@ -1035,7 +1035,7 @@ func TestDoctorPreviewAndApply(t *testing.T) {
 	if err := s.DB.SaveFindings(ctx, doctor.KindWrongMatch, []storage.Finding{{Subject: "1", Title: "Bad Match", Severity: "problem"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DB.SaveFindings(ctx, doctor.KindNaming, []storage.Finding{{Subject: "2", Title: "Report Only", Severity: "note"}}); err != nil {
+	if err := s.DB.SaveFindings(ctx, doctor.KindBlocklist, []storage.Finding{{Subject: "2", Title: "Report Only", Severity: "note"}}); err != nil {
 		t.Fatal(err)
 	}
 	fs, _ := s.DB.Findings(ctx, "open")

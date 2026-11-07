@@ -371,6 +371,19 @@ func (db *DB) RecentFixes(ctx context.Context, limit int) ([]FixJob, error) {
 	return out, rows.Err()
 }
 
+// HasActiveArrDeletion is HasActiveDeletion for a Radarr or Sonarr ID.
+func (db *DB) HasActiveArrDeletion(ctx context.Context, sonarr bool, arrID int64) (bool, error) {
+	mediaType := "movie"
+	if sonarr {
+		mediaType = "show"
+	}
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM deletions d JOIN media m ON m.rating_key IN (d.rating_key, d.parent_key)
+		WHERE m.type = ? AND m.arr_id = ? AND d.state IN (?, ?, ?)`,
+		mediaType, arrID, DeletionScheduled, DeletionNotified, DeletionExecuting).Scan(&n)
+	return n > 0, err
+}
+
 // HasActiveDeletion reports whether an item, or an episode of it, is on its way out.
 func (db *DB) HasActiveDeletion(ctx context.Context, ratingKey string) (bool, error) {
 	var n int

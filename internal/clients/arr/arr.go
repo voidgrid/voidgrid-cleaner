@@ -122,8 +122,12 @@ func (c *Client) MediaManagement(ctx context.Context) (MediaManagement, error) {
 
 // Rename is a file that doesn't match the naming format.
 type Rename struct {
-	ExistingPath string `json:"existingPath"`
-	NewPath      string `json:"newPath"`
+	ExistingPath  string `json:"existingPath"`
+	NewPath       string `json:"newPath"`
+	MovieID       int64  `json:"movieId"`
+	MovieFileID   int64  `json:"movieFileId"`
+	SeriesID      int64  `json:"seriesId"`
+	EpisodeFileID int64  `json:"episodeFileId"`
 }
 
 // DiskSpace lists free and total space per disk.
@@ -143,21 +147,22 @@ func (c *Client) RemoveFromQueue(ctx context.Context, queueID int64) error {
 
 // Movie is a Radarr movie.
 type Movie struct {
-	ID              int64      `json:"id"`
-	Title           string     `json:"title"`
-	Year            int        `json:"year"`
-	TmdbID          int64      `json:"tmdbId"`
-	Monitored       bool       `json:"monitored"`
-	HasFile         bool       `json:"hasFile"`
-	SizeOnDisk      int64      `json:"sizeOnDisk"`
-	Path            string     `json:"path"`
-	RootFolderPath  string     `json:"rootFolderPath"`
-	Added           time.Time  `json:"added"`
-	OriginalTitle   string     `json:"originalTitle"`
-	ImdbID          string     `json:"imdbId"`
-	IsAvailable     bool       `json:"isAvailable"`
-	AlternateTitles []AltTitle `json:"alternateTitles"`
-	MovieFile       *struct {
+	ID               int64      `json:"id"`
+	Title            string     `json:"title"`
+	Year             int        `json:"year"`
+	TmdbID           int64      `json:"tmdbId"`
+	Monitored        bool       `json:"monitored"`
+	HasFile          bool       `json:"hasFile"`
+	SizeOnDisk       int64      `json:"sizeOnDisk"`
+	Path             string     `json:"path"`
+	RootFolderPath   string     `json:"rootFolderPath"`
+	Added            time.Time  `json:"added"`
+	OriginalTitle    string     `json:"originalTitle"`
+	ImdbID           string     `json:"imdbId"`
+	QualityProfileID int64      `json:"qualityProfileId"`
+	IsAvailable      bool       `json:"isAvailable"`
+	AlternateTitles  []AltTitle `json:"alternateTitles"`
+	MovieFile        *struct {
 		RelativePath string `json:"relativePath"`
 	} `json:"movieFile"`
 }
@@ -206,18 +211,19 @@ func (r *Radarr) DeleteMovie(ctx context.Context, movieID int64) error {
 
 // Series is a Sonarr series.
 type Series struct {
-	ID              int64      `json:"id"`
-	Title           string     `json:"title"`
-	TvdbID          int64      `json:"tvdbId"`
-	TmdbID          int64      `json:"tmdbId"`
-	Monitored       bool       `json:"monitored"`
-	Path            string     `json:"path"`
-	RootFolderPath  string     `json:"rootFolderPath"`
-	Added           time.Time  `json:"added"`
-	Year            int        `json:"year"`
-	ImdbID          string     `json:"imdbId"`
-	AlternateTitles []AltTitle `json:"alternateTitles"`
-	Statistics      struct {
+	ID               int64      `json:"id"`
+	Title            string     `json:"title"`
+	TvdbID           int64      `json:"tvdbId"`
+	TmdbID           int64      `json:"tmdbId"`
+	Monitored        bool       `json:"monitored"`
+	Path             string     `json:"path"`
+	RootFolderPath   string     `json:"rootFolderPath"`
+	Added            time.Time  `json:"added"`
+	Year             int        `json:"year"`
+	ImdbID           string     `json:"imdbId"`
+	QualityProfileID int64      `json:"qualityProfileId"`
+	AlternateTitles  []AltTitle `json:"alternateTitles"`
+	Statistics       struct {
 		SizeOnDisk       int64 `json:"sizeOnDisk"`
 		EpisodeFileCount int   `json:"episodeFileCount"`
 	} `json:"statistics"`

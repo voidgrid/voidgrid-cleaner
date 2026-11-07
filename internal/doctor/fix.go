@@ -24,6 +24,15 @@ type fixData struct {
 	WantID    string `json:"want_id,omitempty"`
 	ArrTitle  string `json:"arr_title,omitempty"`
 	ArrYear   int    `json:"arr_year,omitempty"`
+	App       string `json:"app,omitempty"` // "radarr" or "sonarr"
+	ArrID     int64  `json:"arr_id,omitempty"`
+	FileID    int64  `json:"file_id,omitempty"`
+	OldName   string `json:"old_name,omitempty"`
+	NewName   string `json:"new_name,omitempty"`
+	Folder    string `json:"folder,omitempty"`
+	Root      string `json:"root,omitempty"`
+	// Resolution is what Plex measured, as Plex writes it.
+	Resolution string `json:"resolution,omitempty"`
 }
 
 func encode(d fixData) string {
@@ -38,12 +47,22 @@ const localPrefix = "plex:local:"
 
 // Fixable reports whether the doctor can fix a finding.
 func Fixable(kind, subject string) bool {
-	return kind == KindWrongMatch || kind == KindQuestionable || (kind == KindSettings && strings.HasPrefix(subject, localPrefix))
+	return NeedsChoice(kind) || kind == KindReleaseTitle || kind == KindNaming ||
+		(kind == KindSettings && (strings.HasPrefix(subject, localPrefix) || subject == emptyFoldersSubject))
 }
+
+// NeedsChoice reports whether a kind's fix waits for the admin to pick an option.
+func NeedsChoice(kind string) bool {
+	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted
+}
+
+// refreshChoice keeps the match and re-reads the item's metadata.
+const refreshChoice = "refresh"
 
 // Choice is one option a fix offers.
 type Choice struct {
 	Value, Label string
+	Default      bool // selected to start with
 }
 
 // Preview says exactly what a fix would do, before anyone approves it.
@@ -51,7 +70,9 @@ type Preview struct {
 	Finding storage.Finding
 	Lines   []string
 	Choices []Choice // if set, the admin picks one
-	CanFix  bool
+	// HasDefault says a choice starts selected, not "leave it as it is".
+	HasDefault bool
+	CanFix     bool
 }
 
 func plexAgent(itemType string) string {
@@ -68,6 +89,9 @@ func (d *Doctor) Preview(ctx context.Context, f storage.Finding) (Preview, error
 	if err := json.Unmarshal([]byte(f.Data), &data); err != nil {
 		return p, err
 	}
+	if isArrFix(f) {
+		return p, d.previewArr(ctx, &p, data)
+	}
 	if f.Kind == KindSettings {
 		p.CanFix = true
 		p.Lines = []string{
@@ -80,6 +104,22 @@ func (d *Doctor) Preview(ctx context.Context, f storage.Finding) (Preview, error
 	item, err := d.Plex.Item(ctx, data.RatingKey)
 	if err != nil {
 		return p, err
+	}
+	if f.Kind == KindReleaseTitle {
+		p.CanFix = true
+		p.Lines = []string{"Refresh this item's metadata in Plex, so its title comes from Plex's own data. Its match doesn't change."}
+		return p, nil
+	}
+	// The right match with the wrong name needs a refresh. Rematching can't help,
+	// and listing other films would hide that the match is already right.
+	if data.WantID != "" && item.ExternalID(data.Agent) == data.WantID {
+		p.CanFix = true
+		p.Choices = []Choice{{Value: refreshChoice, Label: "keep the match and refresh its metadata"}}
+		p.Lines = []string{
+			fmt.Sprintf("Plex has the right match: it's %s (%d), the same as Radarr or Sonarr. Only what's displayed differs: %s (%d).", data.ArrTitle, data.ArrYear, item.Title, item.Year),
+			"If the difference is fine, dismiss it instead.",
+		}
+		return p, nil
 	}
 	choices, err := d.candidates(ctx, data, item)
 	if err != nil {
@@ -136,8 +176,17 @@ func (d *Doctor) apply(ctx context.Context, f storage.Finding, choice string) (s
 	if err := json.Unmarshal([]byte(f.Data), &data); err != nil {
 		return "", err
 	}
+	if isArrFix(f) {
+		return d.applyArr(ctx, f, data, choice)
+	}
 	if f.Kind == KindSettings {
 		return d.applyLocalMetadata(ctx, data)
+	}
+	if f.Kind == KindReleaseTitle || choice == refreshChoice {
+		if err := d.Plex.RefreshItem(ctx, data.RatingKey); err != nil {
+			return "", err
+		}
+		return "refresh started; the next check shows if the title changed", nil
 	}
 	guid, name, ok := strings.Cut(choice, "|")
 	if !ok || !strings.HasPrefix(guid, "plex://") {
@@ -240,6 +289,15 @@ func (d *Doctor) fixOutcome(ctx context.Context, job storage.FixJob) (state, det
 	}
 	if data.RatingKey != "" {
 		busy, err := d.DB.HasActiveDeletion(ctx, data.RatingKey)
+		if err != nil {
+			return "failed", err.Error()
+		}
+		if busy {
+			return "skipped", "it's being deleted"
+		}
+	}
+	if data.ArrID != 0 {
+		busy, err := d.DB.HasActiveArrDeletion(ctx, data.App == appSonarr, data.ArrID)
 		if err != nil {
 			return "failed", err.Error()
 		}

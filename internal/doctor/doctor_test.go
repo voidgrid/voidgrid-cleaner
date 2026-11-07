@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ type fakeArr struct {
 	fail   error
 	renErr error
 	rename []arr.Rename
+
+	commands []map[string]any
+	status   string
 }
 
 func (f *fakeArr) RootFolders(context.Context) ([]arr.RootFolder, error) {
@@ -38,9 +42,27 @@ func (f *fakeArr) MediaManagement(context.Context) (arr.MediaManagement, error) 
 	return f.state.settings, nil
 }
 
+func (f *fakeArr) Command(_ context.Context, body map[string]any) (int64, error) {
+	f.commands = append(f.commands, body)
+	return 1, nil
+}
+
+func (f *fakeArr) CommandStatus(context.Context, int64) (string, string, error) {
+	if f.status == "" {
+		return "completed", "", nil
+	}
+	return f.status, "boom", nil
+}
+
 type fakeRadarr struct {
 	fakeArr
 	movies []arr.Movie
+
+	gotFile        bool
+	added          map[string]any
+	files          []arr.ImportFile
+	savedSettings  map[string]any
+	ignoreSettings bool
 }
 
 func (f *fakeRadarr) Movies(context.Context) ([]arr.Movie, error) { return f.movies, nil }
@@ -48,11 +70,48 @@ func (f *fakeRadarr) RenamePreview(context.Context, []int64) ([]arr.Rename, erro
 	return f.rename, f.renErr
 }
 
+func (f *fakeRadarr) Movie(_ context.Context, id int64) (arr.Movie, error) {
+	return arr.Movie{ID: id, Title: "Added", HasFile: f.gotFile}, nil
+}
+
+func (f *fakeRadarr) LookupMovies(_ context.Context, term string) ([]map[string]any, error) {
+	if strings.HasPrefix(term, "tmdb:") {
+		return []map[string]any{{"title": "Found", "tmdbId": float64(7), "id": float64(9), "folder": "x"}}, nil
+	}
+	return []map[string]any{{"title": "Found", "year": float64(2001), "tmdbId": float64(7)}}, nil
+}
+
+func (f *fakeRadarr) AddMovie(_ context.Context, m map[string]any) (int64, error) {
+	f.added = m
+	return 5, nil
+}
+
+func (f *fakeRadarr) QualityDefinitions(context.Context) ([]map[string]any, error) {
+	return []map[string]any{{"id": float64(3), "name": "WEBDL-1080p"}}, nil
+}
+
+func (f *fakeRadarr) ImportFiles(context.Context, int64, string) ([]arr.ImportFile, error) {
+	return f.files, nil
+}
+
+func (f *fakeRadarr) MediaManagementRaw(context.Context) (map[string]any, error) {
+	return map[string]any{"keepMe": "yes", "deleteEmptyFolders": false, "createEmptyMovieFolders": true}, nil
+}
+
+func (f *fakeRadarr) SetMediaManagement(_ context.Context, s map[string]any) error {
+	f.savedSettings = s
+	if !f.ignoreSettings {
+		f.state.settings.DeleteEmptyFolders, f.state.settings.CreateEmptyMovieFolders = s["deleteEmptyFolders"] == true, s["createEmptyMovieFolders"] == true
+	}
+	return nil
+}
+
 type fakeSonarr struct {
 	fakeArr
 	series   []arr.Series
 	files    []arr.EpisodeFile
 	filesErr error
+	added    map[string]any
 }
 
 func (f *fakeSonarr) Series(context.Context) ([]arr.Series, error) { return f.series, nil }
@@ -62,6 +121,15 @@ func (f *fakeSonarr) RenamePreview(context.Context, int64) ([]arr.Rename, error)
 
 func (f *fakeSonarr) EpisodeFiles(context.Context, int64) ([]arr.EpisodeFile, error) {
 	return f.files, f.filesErr
+}
+
+func (f *fakeSonarr) LookupSeries(context.Context, string) ([]map[string]any, error) {
+	return []map[string]any{{"title": "Found Show", "year": float64(2001), "tvdbId": float64(8), "seasons": []any{map[string]any{"seasonNumber": float64(1), "monitored": true}}}}, nil
+}
+
+func (f *fakeSonarr) AddSeries(_ context.Context, m map[string]any) (int64, error) {
+	f.added = m
+	return 6, nil
 }
 
 type fakePlex struct {
@@ -111,6 +179,11 @@ func (f *fakePlex) Match(_ context.Context, key, guid, name string) error {
 func (f *fakePlex) SetPreferLocalMetadata(_ context.Context, k string, on bool) error {
 	f.calls = append(f.calls, fmt.Sprintf("prefs %s %v", k, on))
 	f.local = on || f.stuckLocal
+	return nil
+}
+
+func (f *fakePlex) RefreshItem(_ context.Context, k string) error {
+	f.calls = append(f.calls, "refresh item "+k)
 	return nil
 }
 
@@ -164,7 +237,7 @@ func newWorld(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	w := &world{root: root}
-	w.radarr = &fakeRadarr{movies: []arr.Movie{{ID: 1, Title: "Film", Year: 2000, TmdbID: 100, Path: film, HasFile: true, MovieFile: &struct {
+	w.radarr = &fakeRadarr{movies: []arr.Movie{{ID: 1, Title: "Film", Year: 2000, TmdbID: 100, Path: film, HasFile: true, QualityProfileID: 4, MovieFile: &struct {
 		RelativePath string `json:"relativePath"`
 	}{"Film.mkv"}}}}
 	w.radarr.state.roots = []arr.RootFolder{{Path: root}}
@@ -620,5 +693,276 @@ func TestInterruptedFixDoesntResume(t *testing.T) {
 	}
 	if n := w.d.RunFixes(ctx); n != 0 {
 		t.Fatal(n)
+	}
+}
+
+// Plex can have the right match and show the wrong name. The fix is a refresh:
+// a list of other films would suggest the match was wrong and hide that it isn't.
+func TestRightMatchWrongTitleOffersRefresh(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.plex.items["1"][0].Title = "Completely Else"
+	w.plex.matches = []plex.Match{{GUID: "plex://movie/1", Name: "Film", Year: 2000}, {GUID: "plex://movie/8", Name: "Unrelated", Year: 2000}}
+	w.run(t)
+	fs := w.open(t, KindQuestionable)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	p, err := w.d.Preview(ctx, fs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.CanFix || len(p.Choices) != 1 || p.Choices[0].Value != refreshChoice || !strings.Contains(p.Lines[0], "right match") {
+		t.Fatalf("%+v", p)
+	}
+	if j := w.fix(t, fs[0], refreshChoice); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if got := strings.Join(w.plex.calls, "|"); got != "refresh item 10" {
+		t.Fatal(got)
+	}
+}
+
+func TestReleaseTitleFixRefreshesTheItem(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.plex.items["1"][0].Title = "Film.2000.1080p.BluRay.x265-RARBG"
+	w.run(t)
+	fs := w.open(t, KindReleaseTitle)
+	if len(fs) != 1 || !Fixable(fs[0].Kind, fs[0].Subject) || NeedsChoice(fs[0].Kind) {
+		t.Fatalf("%+v", fs)
+	}
+	p, err := w.d.Preview(ctx, fs[0])
+	if err != nil || !p.CanFix || len(p.Choices) != 0 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if j := w.fix(t, fs[0], ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if got := strings.Join(w.plex.calls, "|"); got != "refresh item 10" {
+		t.Fatal(got)
+	}
+}
+
+func TestRenameFix(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.radarr.rename = []arr.Rename{{MovieID: 1, MovieFileID: 22, ExistingPath: "Old.mkv", NewPath: "New.mkv"}}
+	w.run(t)
+	fs := w.open(t, KindNaming)
+	if len(fs) != 1 || fs[0].Subject != "radarr:22" {
+		t.Fatalf("%+v", fs)
+	}
+	p, err := w.d.Preview(ctx, fs[0])
+	if err != nil || !p.CanFix || !strings.Contains(p.Lines[0], "Old.mkv to New.mkv") {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if len(w.radarr.commands) != 0 {
+		t.Fatal("a preview ran a command")
+	}
+	if j := w.fix(t, fs[0], ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	c := w.radarr.commands[0]
+	if c["name"] != "RenameFiles" || c["movieId"] != int64(1) || fmt.Sprint(c["files"]) != "[22]" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestRenameFixReportsAFailedCommand(t *testing.T) {
+	w := newWorld(t)
+	w.sonarr.series = []arr.Series{{ID: 3, Title: "Show", TvdbID: 9, Path: w.root}}
+	w.radarr.rename = []arr.Rename{{SeriesID: 3, EpisodeFileID: 44, ExistingPath: "a.mkv", NewPath: "b.mkv"}}
+	w.run(t)
+	fs := w.open(t, KindNaming)
+	if len(fs) != 1 || fs[0].Subject != "sonarr:44" {
+		t.Fatalf("%+v", fs)
+	}
+	w.sonarr.status = "failed"
+	if j := w.fix(t, fs[0], ""); j.State != "failed" || !strings.Contains(j.Detail, "boom") {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestFixSkipsArrItemBeingDeleted(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.radarr.rename = []arr.Rename{{MovieID: 1, MovieFileID: 22, ExistingPath: "Old.mkv", NewPath: "New.mkv"}}
+	w.run(t)
+	if err := w.d.DB.ReplaceLibrary(ctx, []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}}, []storage.Media{{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "Film", ArrID: sql.NullInt64{Int64: 1, Valid: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := w.d.DB.ScheduleDeletion(ctx, "10", 1, true, storage.KindManual); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if j := w.fix(t, w.open(t, KindNaming)[0], ""); j.State != "skipped" || len(w.radarr.commands) != 0 {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func (w *world) untrackedFolder(t *testing.T, withVideo bool) storage.Finding {
+	t.Helper()
+	dir := filepath.Join(w.root, "Lost (2001)")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	name := ".plexmatch"
+	if withVideo {
+		name = "Lost.mkv"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.radarr.state.roots[0].UnmappedFolders = []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}{{Name: "Lost (2001)", Path: dir}}
+	w.run(t)
+	fs := w.open(t, KindUntracked)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0]
+}
+
+func TestAddUntrackedFolderUnmonitoredWithNoSearch(t *testing.T) {
+	w := newWorld(t)
+	f := w.untrackedFolder(t, true)
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil || !p.CanFix || len(p.Choices) != 1 || p.Choices[0].Value != "7" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	w.radarr.gotFile = true
+	if j := w.fix(t, f, "7"); j.State != "done" || !strings.Contains(j.Detail, "with its file") {
+		t.Fatalf("%+v", j)
+	}
+	m := w.radarr.added
+	if m["monitored"] != false || m["path"] != filepath.Join(w.root, "Lost (2001)") || m["rootFolderPath"] != w.root || m["qualityProfileId"] != int64(4) {
+		t.Fatalf("%+v", m)
+	}
+	if m["addOptions"].(map[string]any)["searchForMovie"] != false {
+		t.Fatal("a search would download something")
+	}
+	if _, ok := m["id"]; ok {
+		t.Fatal("kept the lookup's ID")
+	}
+}
+
+func TestFolderWithNoVideoCantBeAdded(t *testing.T) {
+	w := newWorld(t)
+	f := w.untrackedFolder(t, false)
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil || p.CanFix || len(p.Choices) != 0 {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestAddRefusesNoChoice(t *testing.T) {
+	w := newWorld(t)
+	f := w.untrackedFolder(t, true)
+	if j := w.fix(t, f, "nope"); j.State != "failed" || w.radarr.added != nil {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestManualImport(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.radarr.movies[0].HasFile, w.radarr.movies[0].MovieFile = false, nil
+	w.run(t)
+	fs := w.open(t, KindNotAccepted)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	w.radarr.files = []arr.ImportFile{{Path: "/m/Film.mkv", RelativePath: "Film.mkv", FolderName: "Film"}}
+	p, err := w.d.Preview(ctx, fs[0])
+	if err != nil || !p.CanFix || len(p.Choices) == 0 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	w.radarr.gotFile = true
+	if j := w.fix(t, fs[0], "WEBDL-1080p"); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if c := w.radarr.commands[0]; c["name"] != "ManualImport" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestManualImportThatDoesntTakeFails(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.movies[0].HasFile, w.radarr.movies[0].MovieFile = false, nil
+	w.run(t)
+	w.radarr.files = []arr.ImportFile{{Path: "/m/Film.mkv"}}
+	if j := w.fix(t, w.open(t, KindNotAccepted)[0], "WEBDL-1080p"); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestEmptyFoldersFixKeepsOtherSettings(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.state.settings = arr.MediaManagement{CreateEmptyMovieFolders: true, RecycleBin: "/bin"}
+	w.run(t)
+	fs := w.open(t, KindSettings)
+	if len(fs) != 1 || !Fixable(fs[0].Kind, fs[0].Subject) {
+		t.Fatalf("%+v", fs)
+	}
+	if j := w.fix(t, fs[0], ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if s := w.radarr.savedSettings; s["keepMe"] != "yes" || s["deleteEmptyFolders"] != true || s["createEmptyMovieFolders"] != false {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestEmptyFoldersFixNoticesRadarrIgnoringIt(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.state.settings = arr.MediaManagement{CreateEmptyMovieFolders: true, RecycleBin: "/bin"}
+	w.radarr.ignoreSettings = true
+	w.run(t)
+	if j := w.fix(t, w.open(t, KindSettings)[0], ""); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+func TestRecycleBinIsReportOnly(t *testing.T) {
+	if Fixable(KindSettings, "radarr:recycle") {
+		t.Fatal("a recycle bin needs a path someone chooses")
+	}
+}
+
+func TestQualityChoicesFollowPlex(t *testing.T) {
+	for res, want := range map[string]string{"1080": "WEBDL-1080p", "720": "WEBDL-720p", "4k": "WEBDL-2160p", "2160": "WEBDL-2160p", "sd": "DVD", "576": "DVD"} {
+		cs := qualityChoices(res)
+		if cs[0].Value != want || !cs[0].Default {
+			t.Fatalf("%s: %+v", res, cs[0])
+		}
+		if len(cs) != len(importQualities) {
+			t.Fatalf("%s: lost choices: %d", res, len(cs))
+		}
+		for _, c := range cs[1:] {
+			if c.Default {
+				t.Fatalf("%s: two defaults", res)
+			}
+		}
+	}
+	for _, res := range []string{"", "something"} { // nothing measured: nothing is presumed
+		for _, c := range qualityChoices(res) {
+			if c.Default {
+				t.Fatalf("%q: %+v", res, c)
+			}
+		}
+	}
+}
+
+func TestManualImportUsesPlexResolution(t *testing.T) {
+	w := newWorld(t)
+	film := filepath.Join(w.root, "Film (2000)", "Film.mkv")
+	w.plex.items["1"] = []plex.Item{item(t, `{"ratingKey":"10","title":"Film","year":2000,"guid":"plex://movie/1","Guid":[{"id":"tmdb://100"}],"Media":[{"videoResolution":"720","Part":[{"file":"`+film+`"}]}]}`)}
+	w.radarr.movies[0].HasFile, w.radarr.movies[0].MovieFile = false, nil
+	w.radarr.files = []arr.ImportFile{{Path: film, RelativePath: "Film.mkv"}}
+	w.run(t)
+	p, err := w.d.Preview(context.Background(), w.open(t, KindNotAccepted)[0])
+	if err != nil || !p.HasDefault || p.Choices[0].Value != "WEBDL-720p" {
+		t.Fatalf("%+v %v", p, err)
 	}
 }

@@ -103,8 +103,11 @@ names as titles, untracked folders, stale requests, files off the naming scheme,
 that can't be reached only skips the checks that need it, and their last results stay. Dismiss anything you've decided is
 fine, and it stays dismissed.
 
-Entries with a checkbox can be fixed from here: wrong and questionable Plex matches, and a library's **Prefer local metadata**
-setting, which is how release names become titles. Tick them and press **preview** to see exactly what would change; nothing
+Entries with a checkbox can be fixed from here: wrong and questionable Plex matches, release names as titles, and a library's
+**Prefer local metadata** setting, which is how those titles happen. If Plex's match is right and only the name is wrong, the
+fix is a metadata refresh, not a rematch. Radarr and Sonarr issues can be fixed too: renaming files to match your format, adding
+an untracked folder (unmonitored, with no search, so nothing downloads), importing a file Radarr won't accept with a quality you
+pick, and stopping Radarr leaving empty folders. Tick them and press **preview** to see exactly what would change; nothing
 happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
 deleted.
 

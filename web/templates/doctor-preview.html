@@ -11,8 +11,8 @@
         {{if .CanFix}}
         <input type="hidden" name="id" value="{{$id}}">
         {{if .Choices}}
-        <label class="check"><input type="radio" name="choice-{{$id}}" value="" checked> leave it as it is</label>
-        {{range .Choices}}<label class="check"><input type="radio" name="choice-{{$id}}" value="{{.Value}}"> {{.Label}}</label>{{end}}
+        <label class="check"><input type="radio" name="choice-{{$id}}" value=""{{if not .HasDefault}} checked{{end}}> leave it as it is</label>
+        {{range .Choices}}<label class="check"><input type="radio" name="choice-{{$id}}" value="{{.Value}}"{{if .Default}} checked{{end}}> {{.Label}}</label>{{end}}
         {{end}}
         {{end}}
     </section>

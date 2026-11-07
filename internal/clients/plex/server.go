@@ -43,7 +43,8 @@ type Item struct {
 	// Media holds a movie's files. Shows list only Location, and only from
 	// Location below, not in a library listing.
 	Media []struct {
-		Part []struct {
+		VideoResolution string `json:"videoResolution"` // "1080", "720", "4k", "sd" and so on
+		Part            []struct {
 			File string `json:"file"`
 		} `json:"Part"`
 	} `json:"Media"`
@@ -231,6 +232,11 @@ func (s *Server) Item(ctx context.Context, ratingKey string) (Item, error) {
 		return Item{}, fmt.Errorf("plex: no item %s", ratingKey)
 	}
 	return r.MediaContainer.Metadata[0], nil
+}
+
+// RefreshItem re-reads one item's metadata. Plex does it in the background.
+func (s *Server) RefreshItem(ctx context.Context, ratingKey string) error {
+	return s.do(ctx, http.MethodPut, "/library/metadata/"+url.PathEscape(ratingKey)+"/refresh?force=1", nil)
 }
 
 // SetPreferLocalMetadata changes that library setting.

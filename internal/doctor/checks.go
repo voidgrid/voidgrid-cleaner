@@ -199,8 +199,8 @@ func (s *snapshot) releaseTitles() []storage.Finding {
 		for _, it := range lib.items {
 			if releaseName.MatchString(it.Title) {
 				out = append(out, storage.Finding{
-					Subject: it.RatingKey, Title: it.Title, Severity: check,
-					Detail: "This title looks like a release name, likely a tag inside the file. Fix them all at once with the library's prefers local metadata entry under settings.",
+					Subject: it.RatingKey, Title: it.Title, Severity: check, Data: encode(fixData{RatingKey: it.RatingKey}),
+					Detail: "This title looks like a release name, likely a tag inside the file. A metadata refresh replaces it once the library no longer prefers local metadata.",
 				})
 			}
 		}
@@ -209,11 +209,14 @@ func (s *snapshot) releaseTitles() []storage.Finding {
 }
 
 func (s *snapshot) notAccepted() []storage.Finding {
-	plexFiles := map[string]string{}
+	plexFiles, resolutions := map[string]string{}, map[string]string{}
 	for _, lib := range s.libraries {
 		for _, it := range lib.items {
 			for _, f := range it.Files() {
 				plexFiles[path.Dir(f)] = f
+				if len(it.Media) > 0 {
+					resolutions[path.Dir(f)] = it.Media[0].VideoResolution
+				}
 			}
 		}
 	}
@@ -221,7 +224,7 @@ func (s *snapshot) notAccepted() []storage.Finding {
 	for _, m := range s.movies {
 		if f, ok := plexFiles[m.Path]; ok && !m.HasFile {
 			out = append(out, storage.Finding{
-				Subject: m.Path, Title: m.Title, Severity: problem,
+				Subject: m.Path, Title: m.Title, Severity: problem, Data: encode(fixData{App: appRadarr, ArrID: m.ID, Folder: m.Path, Resolution: resolutions[m.Path]}),
 				Detail: "Plex plays " + path.Base(f) + ", and Radarr shows the movie as missing.",
 			})
 		}
@@ -252,12 +255,16 @@ func (s *snapshot) inManaged(p string) bool {
 	return slices.ContainsFunc(s.managedRoots(), func(root string) bool { return strings.HasPrefix(p, root+"/") })
 }
 
-func (s *snapshot) unmapped() []string {
-	var out []string
-	for _, st := range []arrState{s.radarr, s.sonarr} {
+type unmappedFolder struct {
+	path, root, app string
+}
+
+func (s *snapshot) unmapped() []unmappedFolder {
+	var out []unmappedFolder
+	for app, st := range map[string]arrState{appRadarr: s.radarr, appSonarr: s.sonarr} {
 		for _, r := range st.roots {
 			for _, u := range r.UnmappedFolders {
-				out = append(out, u.Path)
+				out = append(out, unmappedFolder{path: u.Path, root: r.Path, app: app})
 			}
 		}
 	}
@@ -266,20 +273,23 @@ func (s *snapshot) unmapped() []string {
 
 func (s *snapshot) untracked() []storage.Finding {
 	var out []storage.Finding
-	for _, p := range s.unmapped() {
-		if s.inManaged(p) && folderKind(p) == "empty" {
+	for _, u := range s.unmapped() {
+		if s.inManaged(u.path) && folderKind(u.path) == "empty" {
 			continue // reported as an empty folder
 		}
-		out = append(out, storage.Finding{Subject: p, Title: path.Base(p), Severity: problem, Detail: p + " isn't tracked by Radarr or Sonarr."})
+		out = append(out, storage.Finding{
+			Subject: u.path, Title: path.Base(u.path), Severity: problem, Detail: u.path + " isn't tracked by Radarr or Sonarr.",
+			Data: encode(fixData{App: u.app, Folder: u.path, Root: u.root}),
+		})
 	}
 	return out
 }
 
 func (s *snapshot) emptyFolders() []storage.Finding {
 	var out []storage.Finding
-	for _, p := range s.unmapped() {
-		if s.inManaged(p) && folderKind(p) == "empty" {
-			out = append(out, storage.Finding{Subject: p, Title: path.Base(p), Severity: note, Detail: p})
+	for _, u := range s.unmapped() {
+		if s.inManaged(u.path) && folderKind(u.path) == "empty" {
+			out = append(out, storage.Finding{Subject: u.path, Title: path.Base(u.path), Severity: note, Detail: u.path})
 		}
 	}
 	return out
@@ -373,7 +383,7 @@ func (s *snapshot) settings() []storage.Finding {
 	}
 	if st := s.radarr.settings; st.CreateEmptyMovieFolders && !st.DeleteEmptyFolders {
 		out = append(out, storage.Finding{
-			Subject: "radarr:empty", Title: "radarr: leaves empty folders", Severity: check,
+			Subject: emptyFoldersSubject, Title: "radarr: leaves empty folders", Severity: check,
 			Detail: "It creates a folder when a movie is added and doesn't remove empty ones. That may be where empty folders come from.",
 		})
 	}
@@ -428,7 +438,11 @@ func (d *Doctor) naming(ctx context.Context, s *snapshot) ([]storage.Finding, er
 	}
 	out := make([]storage.Finding, 0, len(renames))
 	for _, r := range renames {
-		out = append(out, storage.Finding{Subject: r.ExistingPath, Title: path.Base(r.ExistingPath), Severity: note, Detail: "Would become " + path.Base(r.NewPath)})
+		data := fixData{App: appRadarr, ArrID: r.MovieID, FileID: r.MovieFileID, OldName: path.Base(r.ExistingPath), NewName: path.Base(r.NewPath)}
+		if r.SeriesID != 0 {
+			data.App, data.ArrID, data.FileID = appSonarr, r.SeriesID, r.EpisodeFileID
+		}
+		out = append(out, storage.Finding{Subject: fmt.Sprintf("%s:%d", data.App, data.FileID), Title: data.OldName, Severity: note, Detail: "Would become " + data.NewName, Data: encode(data)})
 	}
 	return out, nil
 }

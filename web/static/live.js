@@ -167,6 +167,11 @@
       e.preventDefault();
       loadMore();
     }
+    if (e.target.matches("[data-tick-all]")) {
+      const boxes = [...e.target.nextElementSibling.querySelectorAll("input[type=checkbox]")];
+      const on = boxes.some((b) => !b.checked);
+      boxes.forEach((b) => { b.checked = on; });
+    }
   });
   document.addEventListener("visibilitychange", poll);
   watchMore();

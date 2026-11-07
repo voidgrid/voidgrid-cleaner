@@ -81,17 +81,27 @@ type (
 		BlocklistSize(context.Context) (int, error)
 		MissingCount(context.Context) (int, error)
 		MediaManagement(context.Context) (arr.MediaManagement, error)
+		commander
 	}
 	RadarrAPI interface {
 		ArrAPI
 		Movies(context.Context) ([]arr.Movie, error)
 		RenamePreview(context.Context, []int64) ([]arr.Rename, error)
+		Movie(context.Context, int64) (arr.Movie, error)
+		LookupMovies(context.Context, string) ([]map[string]any, error)
+		AddMovie(context.Context, map[string]any) (int64, error)
+		QualityDefinitions(context.Context) ([]map[string]any, error)
+		ImportFiles(context.Context, int64, string) ([]arr.ImportFile, error)
+		MediaManagementRaw(context.Context) (map[string]any, error)
+		SetMediaManagement(context.Context, map[string]any) error
 	}
 	SonarrAPI interface {
 		ArrAPI
 		Series(context.Context) ([]arr.Series, error)
 		RenamePreview(context.Context, int64) ([]arr.Rename, error)
 		EpisodeFiles(context.Context, int64) ([]arr.EpisodeFile, error)
+		LookupSeries(context.Context, string) ([]map[string]any, error)
+		AddSeries(context.Context, map[string]any) (int64, error)
 	}
 	PlexAPI interface {
 		Sections(context.Context) ([]plex.Section, error)
@@ -103,6 +113,7 @@ type (
 		Match(ctx context.Context, ratingKey, guid, name string) error
 		SetPreferLocalMetadata(ctx context.Context, sectionKey string, on bool) error
 		RefreshMetadata(context.Context, string) error
+		RefreshItem(context.Context, string) error
 	}
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)

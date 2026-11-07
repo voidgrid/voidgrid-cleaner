@@ -7,6 +7,7 @@
 <p class="muted">runs after each sync. {{if .Dismissed}}<a href="/doctor">show open</a>{{else}}{{if .DismissedCount}}<a href="/doctor?dismissed=1">show {{.DismissedCount}} dismissed</a>{{end}}{{end}}</p>
 {{range .Groups}}
 <h2>{{.Label}} <span class="muted">({{len .Findings}})</span></h2>
+{{if and .Fixable (not $.Doctor.Dismissed)}}<button type="button" data-tick-all>tick all</button>{{end}}
 <table>
     <thead><tr><th><span class="visually-hidden">fix</span></th><th>item</th><th>what's wrong</th><th><span class="visually-hidden">actions</span></th></tr></thead>
     <tbody>

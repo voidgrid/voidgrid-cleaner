@@ -96,6 +96,7 @@ type doctorPage struct {
 
 type findingGroup struct {
 	Label    string
+	Fixable  bool
 	Findings []storage.Finding
 }
 
@@ -656,6 +657,7 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 		for _, f := range fs {
 			if f.Kind == l.Kind {
 				g.Findings = append(g.Findings, f)
+				g.Fixable = g.Fixable || doctor.Fixable(f.Kind, f.Subject)
 			}
 		}
 		if len(g.Findings) > 0 {
@@ -723,7 +725,7 @@ func (s *Server) doctorApply(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		choice := r.PostFormValue("choice-" + v)
-		if choice == "" && f.Kind != doctor.KindSettings {
+		if choice == "" && doctor.NeedsChoice(f.Kind) {
 			continue // left as it is
 		}
 		queued, err := s.DB.QueueFix(r.Context(), id, choice, u.Name)
