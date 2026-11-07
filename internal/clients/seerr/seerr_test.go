@@ -109,7 +109,15 @@ func TestDeleteMedia(t *testing.T) {
 }
 
 func TestIsAdmin(t *testing.T) {
-	if !(User{Permissions: 2 | 32}).IsAdmin() || !(User{Permissions: 16 | 32}).IsAdmin() || (User{Permissions: 32 | 128}).IsAdmin() {
+	if !(User{Permissions: 2 | 32}).IsAdmin() || !(User{Permissions: 16 | 32}).IsAdmin() || !(User{Permissions: 32 | 128}).IsAdmin() || (User{Permissions: 32}).IsAdmin() {
 		t.Fatal("admin bit")
+	}
+}
+
+func TestAdminIncludesAutoApprove(t *testing.T) {
+	for perms, want := range map[int64]bool{2: true, 16: true, 128: true, 256: true, 512: true, 32: false, 0: false, 4194336: false} {
+		if got := (User{Permissions: perms}).IsAdmin(); got != want {
+			t.Fatalf("%d: got %v", perms, got)
+		}
 	}
 }

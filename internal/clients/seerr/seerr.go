@@ -25,6 +25,10 @@ var ErrBadCredentials = errors.New("seerr: wrong email or password")
 const (
 	permAdmin          = 2
 	permManageRequests = 16
+	// The auto-approve permissions: all, movies only and TV only.
+	permAutoApprove      = 128
+	permAutoApproveMovie = 256
+	permAutoApproveTV    = 512
 )
 
 // Client calls one Seerr server. With the API key Seerr acts as its admin
@@ -46,9 +50,12 @@ type User struct {
 	Permissions  int64  `json:"permissions"`
 }
 
-// IsAdmin reports whether the user is an admin in this app: Seerr Admin or
-// Manage Requests.
-func (u User) IsAdmin() bool { return u.Permissions&(permAdmin|permManageRequests) != 0 }
+// IsAdmin reports whether the user is an admin in this app: Seerr Admin,
+// Manage Requests, or any auto-approve permission. Someone Seerr trusts to
+// get things without approval is trusted with the library here too.
+func (u User) IsAdmin() bool {
+	return u.Permissions&(permAdmin|permManageRequests|permAutoApprove|permAutoApproveMovie|permAutoApproveTV) != 0
+}
 
 // Name is the best display name Seerr has for the user.
 func (u User) Name() string {

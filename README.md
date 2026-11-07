@@ -218,7 +218,7 @@ The admin page also shows each disk holding a library and the space-based items 
 ### Who can sign in
 
 Anyone with a Seerr account, using Plex or a Seerr local account. Seerr users
-with **Admin** or **Manage Requests** are admins here; everyone else manages
+with **Admin**, **Manage Requests** or any **Auto-Approve** permission are admins here; everyone else manages
 only what they requested.
 
 ### Backups
