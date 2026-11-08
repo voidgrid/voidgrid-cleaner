@@ -43,6 +43,7 @@ const (
 	KindSettings        = "settings_drift"
 	KindBlocklist       = "blocklist"
 	KindWatchDrift      = "watch_drift"
+	KindNotManaged      = "not_managed"
 )
 
 // Labels names each kind, in the order the screen lists them.
@@ -56,6 +57,7 @@ var Labels = []struct{ Kind, Label string }{
 	{KindReleaseTitle, "release name as title"},
 	{KindNotAccepted, "file not accepted"},
 	{KindUntracked, "untracked folder"},
+	{KindNotManaged, "not in radarr or sonarr"},
 	{KindHealth, "radarr and sonarr health"},
 	{KindStaleRequest, "stale seerr request"},
 	{KindMissing, "missing"},
@@ -306,6 +308,7 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	save(s.plexOK, KindReleaseTitle, s.releaseTitles)
 	save(all, KindNotAccepted, s.notAccepted)
 	save(arrs, KindUntracked, s.untracked)
+	save(all, KindNotManaged, s.notManaged)
 	save(arrs, KindEmptyFolder, s.emptyFolders)
 	tryFind(all, KindStrayFile, func() ([]storage.Finding, error) { return d.strayFiles(ctx, &s) })
 	save(arrs, KindHealth, s.health)
@@ -321,14 +324,27 @@ func (d *Doctor) Run(ctx context.Context) bool {
 // refreshPaths infers every path in use and tests each one. Without all three
 // services the list would be partial, so the old one stands.
 func (d *Doctor) refreshPaths(ctx context.Context, s *snapshot) error {
+	var err error
+	// The saved mappings say where to look for each path.
+	if s.paths, err = d.DB.LibraryPaths(ctx); err != nil {
+		return err
+	}
 	if s.radarrOK && s.sonarrOK && s.plexOK {
 		if err := d.DB.SaveLibraryPaths(ctx, s.inferPaths()); err != nil {
 			return err
 		}
 	}
-	var err error
 	s.paths, err = d.DB.LibraryPaths(ctx)
 	return err
+}
+
+// local is where the app sees a path the services name.
+func (s *snapshot) local(p string) string { return storage.Local(s.paths, p) }
+
+// local is snapshot.local for fixes, which run without a snapshot.
+func (d *Doctor) local(ctx context.Context, p string) (string, error) {
+	paths, err := d.DB.LibraryPaths(ctx)
+	return storage.Local(paths, p), err
 }
 
 // systemPaths are mounts inside other containers that aren't media.
@@ -380,10 +396,11 @@ func (s *snapshot) inferPaths() []storage.LibraryPath {
 		}
 		sort.Strings(names)
 		lp := storage.LibraryPath{Path: p, UsedBy: strings.Join(names, ", "), Media: media[p]}
-		if info, err := os.Stat(p); err == nil && info.IsDir() {
+		here := s.local(p)
+		if info, err := os.Stat(here); err == nil && info.IsDir() {
 			lp.Visible = true
-			lp.Writable = syscall.Access(p, 2) == nil
-			lp.Verified = hasFile(p, samples)
+			lp.Writable = syscall.Access(here, 2) == nil
+			lp.Verified = hasFile(p, samples, s.local)
 		}
 		out = append(out, lp)
 	}
@@ -413,13 +430,13 @@ func (s *snapshot) sampleFiles() []string {
 
 // hasFile proves a path is really the mount other services see: something
 // they say is under it must exist here. An empty mountpoint proves nothing.
-func hasFile(root string, known []string) bool {
+func hasFile(root string, known []string, local func(string) string) bool {
 	tried := 0
 	for _, f := range known {
 		if !strings.HasPrefix(f, root+"/") {
 			continue
 		}
-		if _, err := os.Stat(f); err == nil {
+		if _, err := os.Stat(local(f)); err == nil {
 			return true
 		}
 		if tried++; tried == 20 {
@@ -439,7 +456,7 @@ func (s *snapshot) pathsNotMounted() []storage.Finding {
 		if !p.Visible {
 			out = append(out, storage.Finding{
 				Subject: p.Path, Title: p.Path, Severity: problem,
-				Detail: p.UsedBy + " uses this path and this app can't see it. Mount it, or dismiss this if it isn't needed here.",
+				Detail: p.UsedBy + " uses this path and this app can't see it. Mount it at the same path, or if it's mounted somewhere else here, say where under library paths on the settings page. Dismiss this if it isn't needed here.",
 			})
 		}
 	}
@@ -453,7 +470,7 @@ func (s *snapshot) pathsNotVerified() []storage.Finding {
 		if p.Visible && !p.Verified && hasKnownFile(p.Path, known) {
 			out = append(out, storage.Finding{
 				Subject: p.Path, Title: p.Path, Severity: problem,
-				Detail: "The folder is here, but files " + p.UsedBy + " list aren't. It may be an empty mountpoint. Disk checks skip it.",
+				Detail: "The folder is here, but files " + p.UsedBy + " list aren't. It may be an empty mountpoint, or another folder is mounted here; say where it really is under library paths on the settings page. Disk checks skip it until then.",
 			})
 		}
 	}

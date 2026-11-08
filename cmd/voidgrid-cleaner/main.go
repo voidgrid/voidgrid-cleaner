@@ -118,6 +118,7 @@ func run() error {
 		// Posters fetch with the short timeout: a page waits on them.
 		Posters:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
 		PosterCache: posters,
+		Episodes:    &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -134,7 +135,6 @@ func run() error {
 	defer cancel()
 	// shortcut: fixed hourly interval, make it a setting if anyone needs another.
 	go syncer.Loop(stop, time.Hour)
-	go worker.Loop(stop, time.Minute)
 	go s.WarmLoop(stop, time.Hour)
 	s.SyncNow = func() { go syncer.Run(stop) } // a no-op if one is already running
 	checkup := &doctor.Doctor{
@@ -149,6 +149,8 @@ func run() error {
 	s.Previews = checkup
 	s.Downloads = checkup
 	s.Space = checkup
+	worker.Disks = checkup
+	go worker.Loop(stop, time.Minute)
 	s.DiscordAdminChannel = cfg.DiscordAdminChannel
 	if worker.AdminChannel {
 		if bot, ok := worker.Notify.(*discord.Client); ok {

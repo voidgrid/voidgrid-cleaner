@@ -1193,10 +1193,10 @@ func TestRootRefusesToEscape(t *testing.T) {
 	if err := os.Symlink(filepath.Dir(outside), link); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeUnder(root, filepath.Join(link, "keep.mkv")); err == nil {
+	if err := removeUnder(root, root, filepath.Join(link, "keep.mkv")); err == nil {
 		t.Fatal("followed a link out of the root")
 	}
-	if err := removeUnder(root, filepath.Join(root, "..", filepath.Base(filepath.Dir(outside)), "keep.mkv")); err == nil {
+	if err := removeUnder(root, root, filepath.Join(root, "..", filepath.Base(filepath.Dir(outside)), "keep.mkv")); err == nil {
 		t.Fatal("walked out of the root")
 	}
 	if _, err := os.Stat(outside); err != nil {
@@ -1213,7 +1213,7 @@ func TestRemoveUnderWontTakeAFullFolder(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.mkv"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeUnder(root, dir); err == nil {
+	if err := removeUnder(root, root, dir); err == nil {
 		t.Fatal("removed a folder with a file in it")
 	}
 }
@@ -1459,6 +1459,28 @@ func TestStuckDownloadsAreOneFindingPerDownload(t *testing.T) {
 	}
 }
 
+// stalledPack is stuckPack still downloading with a warning, which can clear itself.
+func stalledPack() []arr.QueueRecord {
+	q := stuckPack()
+	for i := range q[:2] {
+		q[i].TrackedDownloadState = "downloading"
+	}
+	return q
+}
+
+func TestBlockedDownloadAlertsAtOnce(t *testing.T) {
+	w := newWorld(t)
+	alerts := &fakeAlerts{}
+	w.d.Alerts = alerts
+	w.sonarr.queue = stuckPack()
+	if err := w.d.CheckDownloads(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts.posted) != 1 {
+		t.Fatalf("a blocked import waited: %q", alerts.posted)
+	}
+}
+
 func TestStuckDownloadAlertsOnceAfterAWhile(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -1466,7 +1488,7 @@ func TestStuckDownloadAlertsOnceAfterAWhile(t *testing.T) {
 	w.d.Alerts = alerts
 	now := time.Now()
 	w.d.Now = func() time.Time { return now }
-	w.sonarr.queue = stuckPack()
+	w.sonarr.queue = stalledPack()
 	if err := w.d.CheckDownloads(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1487,7 +1509,7 @@ func TestStuckDownloadAlertsOnceAfterAWhile(t *testing.T) {
 	if err := w.d.CheckDownloads(ctx); err != nil {
 		t.Fatal(err)
 	}
-	w.sonarr.queue = stuckPack()
+	w.sonarr.queue = stalledPack()
 	if err := w.d.CheckDownloads(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1636,5 +1658,117 @@ func TestSpaceCardSkipsTheAppsOwnRoot(t *testing.T) {
 	disks, _, err := w.d.Space(ctx)
 	if err != nil || len(disks) != 1 || disks[0].Path != w.root || disks[0].Used != 30 {
 		t.Fatalf("%+v %v", disks, err)
+	}
+}
+
+func TestSpaceCardReportsDownloadsOnTheSameDisk(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	torrents, sab := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(torrents, "a.mkv"), make([]byte, 1234), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.radarr.state.disks = []arr.DiskSpace{
+		{Path: w.root, FreeSpace: 70, TotalSpace: 100},
+		{Path: torrents, FreeSpace: 70, TotalSpace: 100}, // one filesystem, two mounts
+		{Path: sab, FreeSpace: 900, TotalSpace: 1000},
+	}
+	w.run(t)
+	if err := w.d.DB.SaveLibraryPaths(ctx, []storage.LibraryPath{
+		{Path: w.root, UsedBy: "radarr", Media: true},
+		{Path: torrents, UsedBy: "radarr", Visible: true},
+		{Path: sab, UsedBy: "radarr", Visible: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sab, "b.mkv"), make([]byte, 99), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	disks, _, err := w.d.Space(ctx)
+	if err != nil || len(disks) != 2 || len(disks[0].Downloads) != 1 || disks[0].Downloads[0] != (Usage{torrents, 1234}) || disks[0].DownloadsOnly {
+		t.Fatalf("%+v %v", disks, err)
+	}
+	if d := disks[1]; !d.DownloadsOnly || d.Path != sab || d.Used != 10 || len(d.Downloads) != 1 || d.Downloads[0] != (Usage{sab, 99}) {
+		t.Fatalf("a download folder on its own disk: %+v", d)
+	}
+}
+
+func TestNotManagedOnlyOutsideRootFolders(t *testing.T) {
+	w := newWorld(t)
+	inRoot := filepath.Join(w.root, "Lost (2001)", "Lost.mkv")
+	elsewhere := filepath.Join(t.TempDir(), "Gone (2002)", "Gone.mkv")
+	w.plex.items["1"] = append(w.plex.items["1"],
+		item(t, `{"ratingKey":"11","title":"Lost","guid":"plex://movie/2","Guid":[{"id":"tmdb://200"}],"Media":[{"Part":[{"file":"`+inRoot+`"}]}]}`),
+		item(t, `{"ratingKey":"12","title":"Gone","guid":"plex://movie/3","Guid":[{"id":"tmdb://300"}],"Media":[{"Part":[{"file":"`+elsewhere+`"}]}]}`))
+	w.radarr.state.roots[0].UnmappedFolders = []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}{{Name: "Lost (2001)", Path: filepath.Dir(inRoot)}}
+	w.run(t)
+	fs := w.open(t, KindNotManaged)
+	if len(fs) != 1 || fs[0].Subject != "12" || !strings.Contains(fs[0].Detail, "Radarr root folder") || Fixable(fs[0].Kind, fs[0].Subject) {
+		t.Fatalf("want only the one outside the root, report only: %+v", fs)
+	}
+}
+
+func TestMappedPathIsVerifiedCheckedAndFixedWhereItsMounted(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	// The services see w.root; here the files are mounted somewhere else.
+	here := filepath.Join(t.TempDir(), "mounted")
+	if err := os.Rename(w.root, here); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if ps, _ := w.d.DB.LibraryPaths(ctx); len(ps) == 0 || ps[0].Visible {
+		t.Fatalf("unmapped and gone, yet seen: %+v", ps)
+	}
+	if err := w.d.DB.SetLocalPaths(ctx, map[string]string{w.root: here}); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(here, "Film (2000)", "extra.m2ts")
+	if err := os.WriteFile(stray, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(ctx, []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if ps, _ := w.d.DB.LibraryPaths(ctx); !ps[0].Verified || ps[0].Local != here {
+		t.Fatalf("mapped path not verified: %+v", ps)
+	}
+	fs := w.open(t, KindStrayFile)
+	if len(fs) != 1 || fs[0].Subject != filepath.Join(w.root, "Film (2000)", "extra.m2ts") {
+		t.Fatalf("want the stray named as the services see it: %+v", fs)
+	}
+	if j := w.fix(t, fs[0], ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+	if _, err := os.Stat(filepath.Join(here, "Film (2000)", "Film.mkv")); err != nil {
+		t.Fatal("deleted the tracked file", err)
+	}
+}
+
+func TestLocalPathMapping(t *testing.T) {
+	ps := []storage.LibraryPath{{Path: "/data/media", Local: "/mnt/media"}, {Path: "/data/media/tv", Local: "/tv"}, {Path: "/data/other"}}
+	for in, want := range map[string]string{
+		"/data/media/movies/a.mkv": "/mnt/media/movies/a.mkv",
+		"/data/media/tv/b":         "/tv/b",
+		"/data/media":              "/mnt/media",
+		"/data/mediax/c":           "/data/mediax/c",
+		"/data/other/d":            "/data/other/d",
+	} {
+		if got := storage.Local(ps, in); got != want {
+			t.Fatalf("%s: got %s, want %s", in, got, want)
+		}
+	}
+	for _, bad := range []string{"relative", "/a/../b", "/"} {
+		if storage.ValidLocal(bad) == nil {
+			t.Fatalf("%q accepted", bad)
+		}
 	}
 }

@@ -31,6 +31,10 @@ func fakePMS(t *testing.T) (*Server, func() []string) {
 			 "thumb":"/library/metadata/1049/thumb/1434341184","addedAt":1408525217,
 			 "Guid":[{"id":"imdb://tt0196229"},{"id":"tmdb://9398"}]}]}}`))
 	})
+	mux.HandleFunc("GET /library/metadata/20/allLeaves", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"MediaContainer":{"size":1,"Metadata":[
+			{"ratingKey":"201","type":"episode","title":"Pilot","index":3,"parentIndex":2,"grandparentTitle":"Show"}]}}`))
+	})
 	mux.HandleFunc("/photo/:/transcode", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("url") != "/library/metadata/1049/thumb/1434341184" || r.URL.Query().Get("width") != "200" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -131,5 +135,13 @@ func TestViewHistoryPages(t *testing.T) {
 	got, err := s.ViewHistory(context.Background())
 	if err != nil || len(got) != viewPage+1 || len(starts) != 2 || got[0].AccountID != 7 {
 		t.Fatalf("%d rows, starts %v, %v", len(got), starts, err)
+	}
+}
+
+func TestEpisodes(t *testing.T) {
+	s, _ := fakePMS(t)
+	eps, err := s.Episodes(context.Background(), "20")
+	if err != nil || len(eps) != 1 || eps[0] != (Episode{RatingKey: "201", Title: "Pilot", Season: 2, Number: 3}) {
+		t.Fatalf("%+v %v", eps, err)
 	}
 }

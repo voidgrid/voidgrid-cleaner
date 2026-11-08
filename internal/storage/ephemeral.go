@@ -223,6 +223,30 @@ func (db *DB) WatchedEpisodes(ctx context.Context, dryRun bool) ([]WatchedEpisod
 	return out, rows.Err()
 }
 
+// MarkEpisode queues one episode someone picked by hand. It's titled with the
+// episode, because only hand-marked episodes are named on their own. False if
+// the show is kept, isn't in Sonarr, or the episode already has a deletion.
+func (db *DB) MarkEpisode(ctx context.Context, e WatchedEpisode, by int64, dryRun bool) (bool, error) {
+	return changed(db.ExecContext(ctx, `
+		INSERT INTO deletions (rating_key, parent_key, season, episode, title, media_type, kind, dry_run, scheduled_by, created_at)
+		SELECT ?, m.rating_key, ?, ?, ?, 'episode', ?, ?, ?, ? FROM media m
+		WHERE m.rating_key = ? AND m.type = 'show' AND m.arr_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM item_status st WHERE st.rating_key = m.rating_key AND st.status = ?)
+		ON CONFLICT DO NOTHING`,
+		e.RatingKey, e.Season, e.Episode, e.Title, KindManual, dryRun, by, time.Now().Unix(), e.ShowKey, StatusKeep))
+}
+
+// EpisodeDeletions returns a show's episode deletions under way, by episode.
+func (db *DB) EpisodeDeletions(ctx context.Context, showKey string) (map[string]Deletion, error) {
+	ds, err := db.deletions(ctx, `SELECT `+deletionCols+` FROM deletions WHERE parent_key = ? AND state IN (?, ?, ?)`,
+		showKey, DeletionScheduled, DeletionNotified, DeletionExecuting)
+	out := map[string]Deletion{}
+	for _, d := range ds {
+		out[d.RatingKey] = d
+	}
+	return out, err
+}
+
 // ScheduleEpisode queues one episode of an ephemeral show, titled as the show.
 func (db *DB) ScheduleEpisode(ctx context.Context, e WatchedEpisode, dryRun bool) (bool, error) {
 	return changed(db.ExecContext(ctx, `

@@ -64,6 +64,7 @@
                 {{if $.User.IsAdmin}}
                 <div class="actions">
                     {{range statuses .Type}}<form class="inline-form" method="post" action="/library/item/{{$it.RatingKey}}/{{.}}"><button type="submit"{{if eq . $it.Status}} disabled{{end}}>{{statusName .}}</button></form>{{end}}
+                    {{if and (eq .Type "show") .ArrID.Valid}}<a href="/library/item/{{.RatingKey}}/episodes">episodes</a>{{end}}
                     {{if .DeletionID}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/cancel"><button type="submit">cancel delete</button></form>
                     {{else if ne .Status "keep"}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/delete"><button type="submit">delete</button></form>{{end}}
                 </div>

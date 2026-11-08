@@ -276,6 +276,25 @@ func (s *Server) Items(ctx context.Context, sectionKey string) ([]Item, error) {
 	return r.MediaContainer.Metadata, err
 }
 
+// Episode is one episode of a show.
+type Episode struct {
+	RatingKey string `json:"ratingKey"`
+	Title     string `json:"title"`
+	Season    int    `json:"parentIndex"`
+	Number    int    `json:"index"`
+}
+
+// Episodes lists a show's episodes, every season, in order.
+func (s *Server) Episodes(ctx context.Context, showKey string) ([]Episode, error) {
+	var r struct {
+		MediaContainer struct {
+			Metadata []Episode `json:"Metadata"`
+		} `json:"MediaContainer"`
+	}
+	err := s.do(ctx, http.MethodGet, "/library/metadata/"+url.PathEscape(showKey)+"/allLeaves", &r)
+	return r.MediaContainer.Metadata, err
+}
+
 // RefreshSection makes Plex rescan a library, so deleted files drop out.
 func (s *Server) RefreshSection(ctx context.Context, sectionKey string) error {
 	return s.do(ctx, http.MethodPost, "/library/sections/"+url.PathEscape(sectionKey)+"/refresh", nil)

@@ -24,6 +24,10 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
   or newer: the key is sent in a header.
 - A writable `/data` for the SQLite database. The image runs as uid/gid
   `1000:1000`, so the host directory must be writable by that user.
+- Your media folders and every downloader's download folder mounted into the
+  container (see [Mounts](#mounts)). Without them the app still deletes
+  through Radarr, Sonarr and Plex, but the doctor can't check the disk and
+  download folders aren't reported.
 
 ### Settings
 
@@ -55,6 +59,33 @@ same Docker network as Seerr so `VGC_SEERR_URL` can use Seerr's container
 name, and route the proxy to port `8790`. The image has a healthcheck on
 `/healthz`.
 
+### Mounts
+
+Radarr, Sonarr and Plex tell the app where things are by path. For it to look
+at those paths itself, mount them into the container:
+
+- **Media folders, read-write, at the same path** Radarr, Sonarr and Plex use,
+  e.g. `/srv/media:/srv/media`. The doctor checks them for empty folders, stray
+  files and the like, and changes them only in paths you tick as managed.
+- **Every downloader's download folder, read-only, at the same path** the
+  downloader and Radarr and Sonarr use, e.g. `/srv/torrents:/srv/torrents:ro`.
+  Their size is reported on the **admin** page and in the tech digest, next to
+  the disk they're on, so you can see what seeding or a stuck import is using.
+  A download folder on a disk with no library is reported on its own. Leave
+  one out if you don't need it reported; dismiss its warning on the doctor page.
+
+The **settings** page lists every path the services use, with whether this
+app can see it, write it, and whether it's verified: a file the services list
+really exists there. An empty mountpoint fails that, so a missing mount never
+makes a library look empty. If you can't mount a path at the same place, put
+where it is mounted under **mounted here at**, e.g. `/data/media` mounted at
+`/media`; that covers everything under it, and saving starts a check. Paths
+that aren't mounted or aren't verified show as a warning on the **admin**
+page, linking to both.
+
+Radarr and Sonarr report free space themselves, so space-based deletion works
+on every disk without any of these mounts.
+
 ### Sync
 
 Every hour the app copies Seerr users and requests, the Plex movie and show
@@ -70,7 +101,10 @@ Every Plex movie and show library gets a tab; music and photo libraries are
 never handled. Admins can ignore a library on the **libraries** page: it loses
 its tab and nothing in it can be deleted. Items that Radarr and Sonarr don't
 manage are deleted through Plex alone, which needs **Allow media deletion** on
-in Plex's settings.
+in Plex's settings. Every show belongs in Sonarr and every movie in Radarr: one
+in a root folder they don't track shows on the doctor page as an untracked
+folder you can add, and one outside every root folder is reported so you can
+move it.
 
 ### Statuses and filters
 
@@ -89,13 +123,17 @@ affect sign-in.
 
 ### Space-based items
 
-Every hour the app asks Radarr and Sonarr how full each disk is. When a disk is
-used past the level on the **settings** page (default 90%), its space-based
-items are scheduled for deletion, oldest watched first, then never-watched
-ones, until enough is going to get back under the level. Each goes through the
-usual notice and delay. A deletion that's cancelled or fails isn't tried again
-until the item is marked space-based again. Items Radarr and Sonarr don't
-manage are never picked, because nothing says which disk they're on.
+Every hour the app asks Radarr and Sonarr how full each disk is, and works out
+each item's disk from its path. Each disk has a range on the **settings**
+page: a start (default 75%, about where filesystems start to slow down) and a
+floor (default 70%). When a disk reaches its start, enough on it is scheduled
+for deletion to bring it down to its floor: its space-based items first, oldest
+watched first, then never-watched ones; if those aren't enough, the longest
+unwatched of everything else that isn't kept or ephemeral. Deletions already on
+their way count. Each goes through the usual notice and delay, so anything can
+still be kept. A deletion that's cancelled or fails isn't tried again until the
+item's status is set again. Items Radarr and Sonarr don't manage are never
+picked, because nothing says which disk they're on.
 
 ### Doctor
 
@@ -114,16 +152,15 @@ removed can be taken out of Radarr, keeping its file, and other Radarr and Sonar
 happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
 deleted.
 
-It needs to see your media to check the disk. Mount it at the same path Radarr, Sonarr and Plex use, so a path means the same
-thing everywhere. On the **settings** page, every path in use is listed with whether this app can see it. A path counts as
-verified only when a file the other services list really exists there, and the doctor looks only inside paths you've ticked
-as managed and that are verified. A path a service uses and this app can't see is reported, and you can dismiss it if it
-isn't needed.
+It needs to see your media to check the disk; see [Mounts](#mounts). The doctor looks only inside paths you've ticked as
+managed and that are verified. A path a service uses and this app can't see is reported, and you can dismiss it if it isn't
+needed.
 
 ### Downloads
 
-The **downloads** page shows Radarr's and Sonarr's queues together, with each item's real reason when it's stuck. A download
-stuck for 15 minutes appears on the doctor page with its fixes: import it as Radarr or Sonarr identified it, remove it,
+The **downloads** page shows Radarr's and Sonarr's queues together, with each item's real reason when it's stuck. A stuck
+download appears on the doctor page with its fixes, and is posted once: straight away if Radarr or Sonarr won't import it or it
+failed, since those never clear on their own, and after 15 minutes if it's only a warning, such as a stalled download. The fixes: import it as Radarr or Sonarr identified it, remove it,
 blocklist only, or blocklist and search. With `VGC_DISCORD_ADMIN_CHANNEL` set, it's also posted there with buttons for remove
 and both blocklists; only an admin whose Discord account is linked on the users page can press them.
 
@@ -180,6 +217,12 @@ Items Radarr or Sonarr manage are unmonitored and cleared from the queue
 before their files go, so they can't be downloaded again, then removed from
 Seerr. Anything else is deleted through Plex.
 
+Single episodes can go too: a show's card has an **episodes** link for admins,
+listing every episode Plex has with a **delete** button. Each goes through the
+same notice and delay, named on its own (Show S01E02), and Sonarr stops
+monitoring it so it isn't downloaded again; the show and its other episodes
+stay. Keep on the show stops its episodes going.
+
 Until `VGC_DELETE_LIVE=true`, everything runs as a dry run: the status screen
 shows what would have happened and nothing changes. Items scheduled during a
 dry run stay dry-run after you turn it on.
@@ -213,7 +256,8 @@ delete** wait on the **admin** page, where admins approve or deny them. Approvin
 denied. Conflicting asks are marked. Space-based is for admins only. Admins can let a user skip approval; their asks then
 apply at once, unless someone else's ask on the same item is waiting.
 
-The admin page also shows each disk holding a library and the space-based items in the order they'd go.
+The admin page also shows each disk holding a library with its range and the download folders on it, the space-based items
+in the order they'd go, and a warning for paths that aren't mounted.
 
 ### Who can sign in
 

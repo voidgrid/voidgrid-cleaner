@@ -26,3 +26,4 @@ services:
     volumes:
       - ./data:/data  # must be writable by uid 1000
       - /srv/media:/srv/media  # same path Radarr, Sonarr and Plex use, for the doctor's disk checks
+      - /srv/torrents:/srv/torrents:ro  # each downloader's folder, read-only, so its size is reported

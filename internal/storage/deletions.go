@@ -113,27 +113,34 @@ func (db *DB) ScheduleDeletion(ctx context.Context, ratingKey string, by int64, 
 }
 
 // SpaceItem is an item the free-space check can act on. Active means a
-// deletion is already under way.
+// deletion is already under way; Ticked means it's marked space-based.
 type SpaceItem struct {
 	Media
-	Active bool
+	Active, Ticked bool
 }
 
-// SpaceItems lists space-based items in the order they should go, those
-// already going first. Only what Radarr or Sonarr manage counts, because only
-// they say which disk an item is on. An item whose deletion finished since it
-// was marked stays out until it's marked again: a cancel or failure isn't
-// retried on its own, and a dry run doesn't repeat. dryRun picks which runs count.
+// SpaceItems lists what the space check can take, in the order it takes it:
+// deletions already under way, then space-based items oldest watched first,
+// then normal items longest unwatched first. Only what Radarr or Sonarr manage
+// counts, because only they say which disk an item is on. An item whose
+// deletion finished since its status was set stays out until it's set again:
+// a cancel or failure isn't retried on its own, and a dry run doesn't repeat.
+// dryRun picks which runs count.
 func (db *DB) SpaceItems(ctx context.Context, dryRun bool) ([]SpaceItem, error) {
-	rows, err := db.QueryContext(ctx, `SELECT m.rating_key, m.type, m.title, m.tmdb_id, m.tvdb_id, m.size_bytes, d.id IS NOT NULL, `+lastWatched+`
+	rows, err := db.QueryContext(ctx, `SELECT m.rating_key, m.type, m.title, m.tmdb_id, m.tvdb_id, m.size_bytes,
+			d.id IS NOT NULL AS active, coalesce(st.status, ?) = ? AS ticked, `+lastWatched+`
 		FROM media m
-		JOIN item_status st ON st.rating_key = m.rating_key AND st.status = ?
 		JOIN sections s ON s.section_key = m.section_key AND s.ignored = 0
+		LEFT JOIN item_status st ON st.rating_key = m.rating_key
 		LEFT JOIN deletions d ON d.rating_key = m.rating_key AND d.state IN (?, ?, ?)
-		WHERE m.arr_id IS NOT NULL AND m.size_bytes > 0 AND NOT EXISTS (
-			SELECT 1 FROM deletions f WHERE f.rating_key = m.rating_key AND f.dry_run = ? AND f.finished_at > st.set_at)
-		ORDER BY d.id IS NULL, `+byOldestWatched,
-		StatusSpace, DeletionScheduled, DeletionNotified, DeletionExecuting, dryRun)
+		WHERE m.arr_id IS NOT NULL AND m.size_bytes > 0 AND (d.id IS NOT NULL OR (coalesce(st.status, ?) IN (?, ?) AND NOT EXISTS (
+			SELECT 1 FROM deletions f WHERE f.rating_key = m.rating_key AND f.dry_run = ? AND f.finished_at > coalesce(st.set_at, 0))))
+		ORDER BY active DESC, ticked DESC,
+			CASE WHEN ticked THEN last_watched = 0 ELSE 0 END,
+			CASE WHEN ticked THEN last_watched ELSE max(last_watched, m.added_at) END,
+			m.added_at, m.title COLLATE NOCASE`,
+		StatusNormal, StatusSpace, DeletionScheduled, DeletionNotified, DeletionExecuting,
+		StatusNormal, StatusNormal, StatusSpace, dryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +149,7 @@ func (db *DB) SpaceItems(ctx context.Context, dryRun bool) ([]SpaceItem, error) 
 	for rows.Next() {
 		var it SpaceItem
 		var watched int64
-		if err := rows.Scan(&it.RatingKey, &it.Type, &it.Title, &it.TmdbID, &it.TvdbID, &it.SizeBytes, &it.Active, &watched); err != nil {
+		if err := rows.Scan(&it.RatingKey, &it.Type, &it.Title, &it.TmdbID, &it.TvdbID, &it.SizeBytes, &it.Active, &it.Ticked, &watched); err != nil {
 			return nil, err
 		}
 		out = append(out, it)

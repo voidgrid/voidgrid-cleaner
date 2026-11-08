@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,8 +17,9 @@ import (
 // KindStuck is a download Radarr or Sonarr can't finish on its own.
 const KindStuck = "stuck_download"
 
-// stuckFor is how long a download stays stuck before Discord hears about it,
-// so a moment's hiccup while importing doesn't post anything.
+// stuckFor is how long a download that could still sort itself out, such as
+// a stalled one, stays stuck before Discord hears about it. One blocked or
+// failed posts at once: it never clears on its own.
 const stuckFor = 15 * time.Minute
 
 // What can be done about a stuck download, named as Radarr and Sonarr name them.
@@ -44,6 +46,13 @@ func isStuck(q arr.QueueRecord) bool {
 	return q.TrackedDownloadStatus == "warning" || q.TrackedDownloadStatus == "error" ||
 		q.TrackedDownloadState == "importBlocked" || q.TrackedDownloadState == "failedPending" ||
 		q.Status == "failed" || q.Status == "warning"
+}
+
+// isBlocked is a download that needs someone: Radarr or Sonarr won't import it,
+// or it failed.
+func isBlocked(q arr.QueueRecord) bool {
+	return q.TrackedDownloadState == "importBlocked" || q.TrackedDownloadState == "failedPending" ||
+		q.TrackedDownloadStatus == "error" || q.Status == "failed"
 }
 
 func itemName(q arr.QueueRecord) string {
@@ -156,7 +165,7 @@ func (d *Doctor) CheckDownloads(ctx context.Context) error {
 			found = append(found, storage.Finding{
 				Subject: app + ":" + key, Title: name, Severity: problem,
 				Detail: "Stuck in " + app + ": " + reason + " Release: " + g[0].Title,
-				Data:   encode(fixData{App: app, DownloadID: g[0].DownloadID, QueueIDs: ids, OldName: g[0].Title, NewName: reason}),
+				Data:   encode(fixData{App: app, DownloadID: g[0].DownloadID, QueueIDs: ids, OldName: g[0].Title, NewName: reason, Blocked: slices.ContainsFunc(g, isBlocked)}),
 			})
 		}
 	}
@@ -182,12 +191,15 @@ func (d *Doctor) alertStuck(ctx context.Context) error {
 		return err
 	}
 	for _, f := range open {
-		if f.Kind != KindStuck || f.Alerted || d.now().Sub(time.Unix(f.FirstSeen, 0)) < stuckFor {
+		if f.Kind != KindStuck || f.Alerted {
 			continue
 		}
 		var data fixData
 		if err := jsonDecode(f.Data, &data); err != nil {
 			return err
+		}
+		if !data.Blocked && d.now().Sub(time.Unix(f.FirstSeen, 0)) < stuckFor {
+			continue
 		}
 		text := fmt.Sprintf("**Stuck in %s: %s**\n%s\nRelease: `%s`\nManual import is on the downloads page.", data.App, f.Title, data.NewName, data.OldName)
 		if err := d.Alerts.DownloadAlert(ctx, text, f.ID); err != nil {

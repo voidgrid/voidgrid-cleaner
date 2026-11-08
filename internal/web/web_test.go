@@ -846,19 +846,27 @@ func TestSettingsPage(t *testing.T) {
 	if w, _ := s.DB.DeleteWindow(ctx); w != (storage.DeleteWindow{}) {
 		t.Fatalf("not cleared: %+v", w)
 	}
-	if resp := postForm(t, c, app.URL+"/settings", url.Values{"space_limit": {"85"}}); resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("space limit: %d", resp.StatusCode)
+	two := func(a, b, c, d string) url.Values {
+		return url.Values{"disk": {"/a", "/b"}, "space_start": {a, c}, "space_floor": {b, d}}
 	}
-	resp = postForm(t, c, app.URL+"/settings", url.Values{"space_limit": {"100"}})
-	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "1 to 99") {
-		t.Fatalf("bad limit: %d %s", resp.StatusCode, b)
+	if resp := postForm(t, c, app.URL+"/settings", two("85", "80", "75", "70")); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("space ranges: %d", resp.StatusCode)
 	}
-	if n, _ := s.DB.SpaceLimit(ctx); n != 85 {
-		t.Fatalf("limit %d, want 85", n)
+	resp = postForm(t, c, app.URL+"/settings", two("100", "", "", ""))
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "/a: space used must be a percent from 1 to 99") {
+		t.Fatalf("bad start: %d %s", resp.StatusCode, b)
 	}
-	postForm(t, c, app.URL+"/settings", url.Values{})
-	if n, _ := s.DB.SpaceLimit(ctx); n != storage.DefaultSpaceLimit {
-		t.Fatalf("empty didn't restore the default: %d", n)
+	resp = postForm(t, c, app.URL+"/settings", two("", "", "70", "70"))
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "/b: space-based deletions must clear down to below where they start") {
+		t.Fatalf("floor not below start: %d %s", resp.StatusCode, b)
+	}
+	// Only /a differs from the defaults, so only it is stored.
+	if rs, _ := s.DB.SpaceRanges(ctx); len(rs) != 1 || rs.For("/a") != (storage.SpaceRange{Start: 85, Floor: 80}) || rs.For("/b") != storage.DefaultSpace {
+		t.Fatalf("ranges %+v", rs)
+	}
+	postForm(t, c, app.URL+"/settings", two("", "", "", ""))
+	if rs, _ := s.DB.SpaceRanges(ctx); len(rs) != 0 {
+		t.Fatalf("empty didn't restore the defaults: %+v", rs)
 	}
 }
 
@@ -1363,5 +1371,119 @@ func TestSkipApproval(t *testing.T) {
 	}
 	if r, err := s.DB.Ask(ctx, bob, "10", storage.AskKeep, true); err != nil || r != storage.AskPending {
 		t.Fatal(r, err)
+	}
+}
+
+type fakeEpisodes []plex.Episode
+
+func (f fakeEpisodes) Episodes(context.Context, string) ([]plex.Episode, error) { return f, nil }
+
+func TestMarkEpisodeByHand(t *testing.T) {
+	app, c, s := newTestApp(t, 100) // the admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	ctx := context.Background()
+	if err := s.DB.ReplaceLibrary(ctx, []storage.Section{{Key: "2", Title: "TV", Type: "show"}}, []storage.Media{
+		{RatingKey: "20", SectionKey: "2", Type: "show", Title: "Show", TvdbID: sql.NullInt64{Int64: 5, Valid: true}, ArrID: sql.NullInt64{Int64: 8, Valid: true}},
+		{RatingKey: "21", SectionKey: "2", Type: "show", Title: "Plex Only"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.Episodes = fakeEpisodes{{RatingKey: "201", Title: "Pilot", Season: 1, Number: 1}, {RatingKey: "202", Title: "Two", Season: 1, Number: 2}}
+
+	if b := body(t, get(t, c, app.URL+"/library/item/20/episodes")); !strings.Contains(b, "Pilot") || !strings.Contains(b, "S01E02") {
+		t.Fatalf("page: %s", b)
+	}
+	if resp := get(t, c, app.URL+"/library/item/21/episodes"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a show outside sonarr: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/episodes/999/delete", url.Values{}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("an episode plex doesn't list: %d", resp.StatusCode)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/episodes/202/delete", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("mark: %d", resp.StatusCode)
+	}
+	going, err := s.DB.EpisodeDeletions(ctx, "20")
+	if d := going["202"]; err != nil || d.Title != "Show S01E02" || d.Kind != storage.KindManual || d.Season != 1 || d.Episode != 2 {
+		t.Fatalf("%+v %v", going, err)
+	}
+	// Leaving ephemeral doesn't cancel it; keep on the show does.
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusEphemeral, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusNormal, 1); err != nil {
+		t.Fatal(err)
+	}
+	if going, _ := s.DB.EpisodeDeletions(ctx, "20"); len(going) != 1 {
+		t.Fatalf("leaving ephemeral cancelled a hand-marked episode: %+v", going)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/episodes/202/cancel", url.Values{}); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("cancel: %d", resp.StatusCode)
+	}
+	if going, _ := s.DB.EpisodeDeletions(ctx, "20"); len(going) != 0 {
+		t.Fatalf("not cancelled: %+v", going)
+	}
+	postForm(t, c, app.URL+"/library/item/20/episodes/201/delete", url.Values{})
+	if err := s.DB.SetItemStatus(ctx, "20", storage.StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	if going, _ := s.DB.EpisodeDeletions(ctx, "20"); len(going) != 0 {
+		t.Fatalf("keep didn't stop the episode: %+v", going)
+	}
+	if resp := postForm(t, c, app.URL+"/library/item/20/episodes/202/delete", url.Values{}); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("marked on a kept show: %d", resp.StatusCode)
+	}
+}
+
+type fakeSpace []doctor.Disk
+
+func (f fakeSpace) Space(context.Context) ([]doctor.Disk, []storage.SpaceItem, error) {
+	return f, nil, nil
+}
+
+func TestSettingsListsEachDiskWithItsRange(t *testing.T) {
+	app, c, s := newTestApp(t, 100) // the admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	s.Space = fakeSpace{{Path: "/movies", Range: storage.DefaultSpace}, {Path: "/tv", Range: storage.SpaceRange{Start: 90, Floor: 85}}}
+	b := body(t, get(t, c, app.URL+"/settings"))
+	for _, want := range []string{`<legend>/movies</legend>`, `name="disk" value="/tv"`, `name="space_start" min="2" max="99" value="75"`, `name="space_floor" min="1" max="98" value="85"`} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("missing %s in %s", want, b)
+		}
+	}
+}
+
+func TestPathMappingAndMountsCard(t *testing.T) {
+	app, c, s := newTestApp(t, 100) // the admin
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	ctx := context.Background()
+	if err := s.DB.SaveLibraryPaths(ctx, []storage.LibraryPath{{Path: "/data/media", UsedBy: "radarr", Media: true}, {Path: "/data/tv", UsedBy: "sonarr", Media: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindPathNotMounted, []storage.Finding{{Subject: "/data/tv", Title: "/data/tv", Severity: "problem", Detail: "sonarr uses this path"}}); err != nil {
+		t.Fatal(err)
+	}
+	if b := body(t, get(t, c, app.URL+"/admin")); !strings.Contains(b, "<h2>mounts</h2>") || !strings.Contains(b, "/data/tv") {
+		t.Fatalf("no mounts card: %s", b)
+	}
+	form := url.Values{"path": {"/data/media", "/data/tv"}, "local": {"/media/", "/data/tv"}}
+	if resp := postForm(t, c, app.URL+"/settings", form); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save: %d", resp.StatusCode)
+	}
+	ps, _ := s.DB.LibraryPaths(ctx)
+	if ps[0].Local != "/media" || ps[1].Local != "" {
+		t.Fatalf("want /media mapped and the same path left unmapped: %+v", ps)
+	}
+	resp := postForm(t, c, app.URL+"/settings", url.Values{"path": {"/data/media", "/data/tv"}, "local": {"media", ""}})
+	if b := body(t, resp); resp.StatusCode != http.StatusOK || !strings.Contains(b, "/data/media: &#34;media&#34; must be a full path") || !strings.Contains(b, `value="media"`) {
+		t.Fatalf("bad mapping: %d %s", resp.StatusCode, b)
+	}
+	if ps, _ := s.DB.LibraryPaths(ctx); ps[0].Local != "/media" {
+		t.Fatalf("a bad save changed it: %+v", ps)
 	}
 }

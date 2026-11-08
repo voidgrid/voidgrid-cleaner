@@ -2,6 +2,7 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -64,7 +65,9 @@ type Server struct {
 	// Previews says what doctor fixes would do.
 	Previews Previewer
 	// Posters resizes Plex artwork; PosterCache holds the results on disk.
-	Posters     PosterSource
+	Posters PosterSource
+	// Episodes lists a show's episodes from Plex, for marking one by hand.
+	Episodes    EpisodeSource
 	PosterCache *os.Root
 
 	limiter limiter
@@ -87,6 +90,7 @@ type page struct {
 	Log       *logPage
 	Queue     []doctor.QueueRow
 	Admin     *adminPage
+	Episodes  *episodesPage
 }
 
 type adminPage struct {
@@ -95,6 +99,8 @@ type adminPage struct {
 	Disks      []doctor.Disk
 	SpaceQueue []storage.SpaceItem
 	SpaceError string
+	// Mounts are paths a service uses that aren't mounted here, or not where it says.
+	Mounts []storage.Finding
 }
 
 // SpaceReader reports disks and the space-based queue.
@@ -127,11 +133,61 @@ type logPage struct {
 	More    string
 }
 
+// diskRange is one disk's space range as the form shows it.
+type diskRange struct{ Path, Start, Floor string }
+
+// diskRanges lists each disk holding a library with its range filled in.
+func (s *Server) diskRanges(ctx context.Context) ([]diskRange, string) {
+	if s.Space == nil {
+		return nil, ""
+	}
+	disks, _, err := s.Space.Space(ctx)
+	if err != nil {
+		return nil, "Couldn't read disk space, so the ranges can't be changed now: " + err.Error()
+	}
+	out := make([]diskRange, 0, len(disks))
+	for _, d := range disks {
+		if !d.DownloadsOnly {
+			out = append(out, diskRange{d.Path, strconv.Itoa(d.Range.Start), strconv.Itoa(d.Range.Floor)})
+		}
+	}
+	return out, ""
+}
+
+// parseDiskRanges reads the form's ranges. One left at the defaults or
+// emptied goes back to following them.
+func parseDiskRanges(r *http.Request) ([]diskRange, map[string]*storage.SpaceRange, error) {
+	paths, starts, floors := r.PostForm["disk"], r.PostForm["space_start"], r.PostForm["space_floor"]
+	if len(starts) != len(paths) || len(floors) != len(paths) {
+		return nil, nil, errors.New("the disk ranges didn't come through whole; reload and try again")
+	}
+	rows := make([]diskRange, len(paths))
+	out := map[string]*storage.SpaceRange{}
+	var firstErr error
+	for i, p := range paths {
+		rows[i] = diskRange{p, starts[i], floors[i]}
+		rng, err := storage.ParseSpaceRange(starts[i], floors[i])
+		if err != nil || !strings.HasPrefix(p, "/") {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", p, cmp.Or(err, errors.New("not a disk")))
+			}
+			continue
+		}
+		if rng == storage.DefaultSpace {
+			out[p] = nil
+		} else {
+			out[p] = &rng
+		}
+	}
+	return rows, out, firstErr
+}
+
 type settingsPage struct {
 	Window        storage.DeleteWindow
 	Zone          string
-	SpaceLimit    string
-	DefaultSpace  int
+	Disks         []diskRange
+	DiskError     string
+	DefaultSpace  storage.SpaceRange
 	DefaultWin    storage.DeleteWindow
 	AdminDiscord  string
 	LogExpiry     string
@@ -150,6 +206,21 @@ type statusPage struct {
 	Recent []storage.Deletion
 	// Waiting lists ephemeral shows with episodes someone on them hasn't seen.
 	Waiting []storage.EpisodeWait
+}
+
+// EpisodeSource lists a show's episodes.
+type EpisodeSource interface {
+	Episodes(ctx context.Context, showKey string) ([]plex.Episode, error)
+}
+
+type episodesPage struct {
+	Show     storage.Media
+	Episodes []episodeRow
+}
+
+type episodeRow struct {
+	plex.Episode
+	Deletion *storage.Deletion
 }
 
 // PosterSource returns a Plex thumb resized to width x height as JPEG.
@@ -204,7 +275,7 @@ func init() {
 		"fixable": doctor.Fixable,
 		"gb":      func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log", "downloads", "admin"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log", "downloads", "admin", "episodes"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -271,6 +342,9 @@ func (s *Server) Router() http.Handler {
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			r.Post("/users/discord/{id}", s.setDiscordUser)
 			// shortcut: admins only until the request flow lets users ask for changes.
+			r.Get("/library/item/{ratingKey}/episodes", s.episodes)
+			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/delete", s.markEpisode)
+			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/cancel", s.cancelEpisode)
 			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
 			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion("cancel deletion", s.DB.CancelDeletion))
 			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion("postpone deletion", s.DB.PostponeDeletion))
@@ -987,6 +1061,17 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 			p.SpaceError = "Couldn't read disk space: " + err.Error()
 		}
 	}
+	open, err := s.DB.Findings(r.Context(), "open")
+	if err != nil {
+		log.Printf("web: admin findings: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	for _, f := range open {
+		if f.Kind == doctor.KindPathNotMounted || f.Kind == doctor.KindPathNotVerified {
+			p.Mounts = append(p.Mounts, f)
+		}
+	}
 	render(w, http.StatusOK, "admin", page{User: &u, Admin: p})
 }
 
@@ -1100,6 +1185,106 @@ func (s *Server) scheduleDeletion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "schedule deletion", key, "")
 	backToCard(w, r, section, key)
+}
+
+// showEpisodes reads a Sonarr show and its episodes from Plex. ok false means
+// it already answered.
+func (s *Server) showEpisodes(w http.ResponseWriter, r *http.Request) (storage.Media, []plex.Episode, bool) {
+	m, _, found, err := s.DB.DeletionTarget(r.Context(), chi.URLParam(r, "ratingKey"))
+	if err != nil {
+		log.Printf("web: episodes: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return m, nil, false
+	}
+	// Only Sonarr can stop an episode coming back, so only its shows qualify.
+	if !found || m.Type != "show" || !m.ArrID.Valid || s.Episodes == nil {
+		http.NotFound(w, r)
+		return m, nil, false
+	}
+	eps, err := s.Episodes.Episodes(r.Context(), m.RatingKey)
+	if err != nil {
+		log.Printf("web: episodes from plex: %v", err)
+		http.Error(w, "couldn't reach plex", http.StatusBadGateway)
+		return m, nil, false
+	}
+	return m, eps, true
+}
+
+// episodes lists a show's episodes, each with a delete button.
+func (s *Server) episodes(w http.ResponseWriter, r *http.Request) {
+	m, eps, ok := s.showEpisodes(w, r)
+	if !ok {
+		return
+	}
+	going, err := s.DB.EpisodeDeletions(r.Context(), m.RatingKey)
+	if err != nil {
+		log.Printf("web: episode deletions: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	p := &episodesPage{Show: m}
+	for _, e := range eps {
+		row := episodeRow{Episode: e}
+		if d, ok := going[e.RatingKey]; ok {
+			row.Deletion = &d
+		}
+		p.Episodes = append(p.Episodes, row)
+	}
+	u := userFrom(r.Context())
+	render(w, http.StatusOK, "episodes", page{User: &u, Episodes: p})
+}
+
+// markEpisode schedules one episode by hand. The episode must be one Plex
+// lists for the show, so a forged key can't name anything else.
+func (s *Server) markEpisode(w http.ResponseWriter, r *http.Request) {
+	m, eps, ok := s.showEpisodes(w, r)
+	if !ok {
+		return
+	}
+	key := chi.URLParam(r, "episodeKey")
+	i := slices.IndexFunc(eps, func(e plex.Episode) bool { return e.RatingKey == key })
+	if i < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	e := eps[i]
+	title := fmt.Sprintf("%s S%02dE%02d", m.Title, e.Season, e.Number)
+	u := userFrom(r.Context())
+	done, err := s.DB.MarkEpisode(r.Context(), storage.WatchedEpisode{ShowKey: m.RatingKey, RatingKey: e.RatingKey, Title: title, Season: e.Season, Episode: e.Number}, u.SeerrID, s.DryRun)
+	if err != nil {
+		log.Printf("web: mark episode: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !done {
+		http.Error(w, "the show is set to keep, or this episode is already going", http.StatusConflict)
+		return
+	}
+	s.DB.Audit(r.Context(), u.Name, "schedule deletion", e.RatingKey, title)
+	http.Redirect(w, r, "/library/item/"+url.PathEscape(m.RatingKey)+"/episodes", http.StatusSeeOther)
+}
+
+func (s *Server) cancelEpisode(w http.ResponseWriter, r *http.Request) {
+	show, key := chi.URLParam(r, "ratingKey"), chi.URLParam(r, "episodeKey")
+	going, err := s.DB.EpisodeDeletions(r.Context(), show)
+	if err != nil {
+		log.Printf("web: episode deletions: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Only this show's episodes, and the cancel itself refuses one already executing.
+	if _, ok := going[key]; ok {
+		did, err := s.DB.CancelDeletion(r.Context(), key)
+		if err != nil {
+			log.Printf("web: cancel episode: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if did {
+			s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "cancel deletion", key, going[key].Title)
+		}
+	}
+	http.Redirect(w, r, "/library/item/"+url.PathEscape(show)+"/episodes", http.StatusSeeOther)
 }
 
 // changeDeletion runs a cancel or postpone. If the deletion moved on first
@@ -1234,12 +1419,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	limit, err := s.DB.SpaceLimit(r.Context())
-	if err != nil {
-		log.Printf("web: space limit: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	disks, diskErr := s.diskRanges(r.Context())
 	admin, err := s.DB.AdminDiscord(r.Context())
 	if err != nil {
 		log.Printf("web: admin discord: %v", err)
@@ -1272,7 +1452,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	render(w, http.StatusOK, "settings", page{User: &u, Settings: &settingsPage{
 		LogLevel: level, DefaultLevel: storage.DefaultLogLevel, DigestTime: digestAt, DefaultDigest: storage.DefaultDigestTime,
-		Window: win, Zone: time.Now().Format("MST"), SpaceLimit: strconv.Itoa(limit), DefaultSpace: storage.DefaultSpaceLimit,
+		Window: win, Zone: time.Now().Format("MST"), Disks: disks, DiskError: diskErr, DefaultSpace: storage.DefaultSpace,
 		DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: strconv.Itoa(expiry), DefaultExpiry: storage.DefaultLogExpiry, Paths: paths, Saved: r.URL.Query().Get("saved") == "1",
 	}})
 }
@@ -1280,10 +1460,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	win := storage.DeleteWindow{Start: r.PostFormValue("window_start"), End: r.PostFormValue("window_end")}
-	spaceForm := r.PostFormValue("space_limit")
-	limit, err := storage.ParseSpaceLimit(spaceForm)
+	err := win.Validate()
+	diskRows, ranges, rerr := parseDiskRanges(r)
 	if err == nil {
-		err = win.Validate()
+		err = rerr
 	}
 	admin := strings.TrimSpace(r.PostFormValue("admin_discord"))
 	if err == nil {
@@ -1304,6 +1484,10 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		level, err = storage.ParseLogLevel(levelForm)
 	}
+	locals, lerr := parseLocals(r)
+	if err == nil {
+		err = lerr
+	}
 	if err != nil {
 		u := userFrom(r.Context())
 		// The form must keep listing the paths, or the next save would unmanage them all.
@@ -1313,17 +1497,22 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		for i := range paths { // keep what was typed
+			if l, ok := locals[paths[i].Path]; ok {
+				paths[i].Local = l
+			}
+		}
 		// A 200: a typo here shouldn't count towards a proxy ban.
 		render(w, http.StatusOK, "settings", page{User: &u, Error: err.Error(), Settings: &settingsPage{
 			LogLevel: levelForm, DefaultLevel: storage.DefaultLogLevel, DigestTime: digestForm, DefaultDigest: storage.DefaultDigestTime,
-			Window: win, Zone: time.Now().Format("MST"), SpaceLimit: spaceForm, DefaultSpace: storage.DefaultSpaceLimit,
+			Window: win, Zone: time.Now().Format("MST"), Disks: diskRows, DefaultSpace: storage.DefaultSpace,
 			DefaultWin: storage.DefaultWindow, AdminDiscord: admin, LogExpiry: expiryForm, DefaultExpiry: storage.DefaultLogExpiry, Paths: paths,
 		}})
 		return
 	}
 	err = s.DB.SetDeleteWindow(r.Context(), win)
 	if err == nil {
-		err = s.DB.SetSpaceLimit(r.Context(), limit)
+		err = s.DB.SetSpaceRanges(r.Context(), ranges)
 	}
 	if err == nil {
 		err = s.DB.SetAdminDiscord(r.Context(), admin)
@@ -1340,13 +1529,42 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = s.DB.SetManagedPaths(r.Context(), r.PostForm["managed"])
 	}
+	if err == nil {
+		err = s.DB.SetLocalPaths(r.Context(), locals)
+	}
 	if err != nil {
 		log.Printf("web: save settings: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "save settings", "", "")
+	// A new mapping is only checked on a doctor run, so start one.
+	if s.DoctorNow != nil {
+		s.DoctorNow()
+	}
 	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
+}
+
+// parseLocals reads where each library path is mounted here. The map holds
+// every row, including bad ones, so the form can show them again.
+func parseLocals(r *http.Request) (map[string]string, error) {
+	paths, locals := r.PostForm["path"], r.PostForm["local"]
+	if len(locals) != len(paths) {
+		return nil, errors.New("the library paths didn't come through whole; reload and try again")
+	}
+	out := map[string]string{}
+	var firstErr error
+	for i, p := range paths {
+		l := strings.TrimRight(strings.TrimSpace(locals[i]), "/")
+		if l == p {
+			l = "" // the same place needs no mapping
+		}
+		out[p] = l
+		if err := storage.ValidLocal(l); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	return out, firstErr
 }
 
 // writeAtomic writes name in root via a temp file and rename, so a reader

@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -129,40 +127,28 @@ func (w *Worker) adminDigest(ctx context.Context, d storage.Digest) string {
 	return strings.TrimSpace(b.String())
 }
 
-// diskLines reports each disk holding a library, once per filesystem. over
-// says one is past the space limit.
+// diskLines reports each disk holding a library, once per filesystem, with
+// any download folders on it. over says one has reached the start of the
+// space range.
 func (w *Worker) diskLines(ctx context.Context) (lines []string, over bool) {
-	limit, err := w.DB.SpaceLimit(ctx)
+	if w.Disks == nil {
+		return nil, false
+	}
+	disks, _, err := w.Disks.Space(ctx)
 	if err != nil {
-		return []string{"couldn't read the space limit: " + err.Error()}, false
+		return []string{"couldn't read disk space: " + err.Error()}, false
 	}
-	paths, err := w.DB.LibraryPaths(ctx)
-	if err != nil {
-		return []string{"couldn't read library paths: " + err.Error()}, false
-	}
-	var disks []arr.DiskSpace
-	for _, a := range []interface {
-		DiskSpace(context.Context) ([]arr.DiskSpace, error)
-	}{w.Radarr, w.Sonarr} {
-		ds, err := a.DiskSpace(ctx)
-		if err != nil {
-			return []string{"couldn't read disk space: " + err.Error()}, false
+	for _, d := range disks {
+		if d.DownloadsOnly {
+			lines = append(lines, fmt.Sprintf("%s: %d%% used, %s free (downloads only)", d.Path, d.Used, gigabytes(d.Free)))
+		} else {
+			over = over || d.Used >= d.Range.Start
+			lines = append(lines, fmt.Sprintf("%s: %d%% used, %s free (deletions start at %d%%, clearing to %d%%)",
+				d.Path, d.Used, gigabytes(d.Free), d.Range.Start, d.Range.Floor))
 		}
-		disks = append(disks, ds...)
-	}
-	var seen []arr.DiskSpace
-	for _, p := range paths {
-		if !p.Media {
-			continue
+		for _, u := range d.Downloads {
+			lines = append(lines, fmt.Sprintf("%s on that disk holds %s.", u.Path, gigabytes(u.Bytes)))
 		}
-		d, ok := diskFor(disks, p.Path)
-		if !ok || slices.ContainsFunc(seen, func(o arr.DiskSpace) bool { return sameFS(o, d) }) {
-			continue
-		}
-		seen = append(seen, d)
-		used := int((d.TotalSpace - d.FreeSpace) * 100 / d.TotalSpace)
-		over = over || used >= limit
-		lines = append(lines, fmt.Sprintf("%s: %d%% used, %s free (limit %d%%)", d.Path, used, gigabytes(d.FreeSpace), limit))
 	}
 	return lines, over
 }

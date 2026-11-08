@@ -61,13 +61,16 @@ func hasVideo(dir string) (found, ok bool) {
 
 func (d *Doctor) previewUntracked(ctx context.Context, p *Preview, data fixData) error {
 	// Nothing to import, whatever a search finds for the folder's name.
-	if found, ok := hasVideo(data.Folder); ok && !found {
+	here, err := d.local(ctx, data.Folder)
+	if err != nil {
+		return err
+	}
+	if found, ok := hasVideo(here); ok && !found {
 		p.Lines = []string{"There's no video in " + data.Folder + ", so there's nothing to add."}
 		return nil
 	}
 	term := folderYear.ReplaceAllString(path.Base(data.Folder), "")
 	var results []map[string]any
-	var err error
 	key := "tmdbId"
 	if data.App == appSonarr {
 		key = "tvdbId"

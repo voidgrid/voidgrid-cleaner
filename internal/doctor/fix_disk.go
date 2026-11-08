@@ -24,7 +24,7 @@ func isDiskFix(f storage.Finding) bool {
 	return f.Kind == KindEmptyFolder || f.Kind == KindStrayFile || f.Kind == KindStaleRequest
 }
 
-func (d *Doctor) previewDisk(p *Preview, data fixData) {
+func (d *Doctor) previewDisk(ctx context.Context, p *Preview, data fixData) {
 	p.CanFix = true
 	switch p.Finding.Kind {
 	case KindStaleRequest:
@@ -33,7 +33,9 @@ func (d *Doctor) previewDisk(p *Preview, data fixData) {
 		p.Lines = []string{"Remove " + data.Folder + ". It holds no media.", "If anything else has appeared in it by then, it's left alone."}
 	case KindStrayFile:
 		p.Lines = []string{"Delete " + data.Folder + " for good. Radarr and Sonarr have no recycle bin here, so it can't be undone."}
-		if info, err := os.Stat(data.Folder); err == nil {
+		if here, err := d.local(ctx, data.Folder); err != nil {
+			p.Lines = append(p.Lines, "Couldn't read the library paths: "+err.Error())
+		} else if info, err := os.Stat(here); err == nil {
 			p.Lines = append(p.Lines, fmt.Sprintf("It's %.1f GB.", float64(info.Size())/1e9))
 		}
 		if d.DryRun {
@@ -78,10 +80,11 @@ func (d *Doctor) managedRoot(ctx context.Context, p string) (string, error) {
 	return "", errors.New("that's not in a managed, verified path")
 }
 
-// removeUnder removes names from root, relative to it. os.Root refuses anything
+// removeUnder removes names from root, relative to it, both as the services
+// name them; local says where the app sees root. os.Root refuses anything
 // that would leave root, and Remove won't take a folder that isn't empty.
-func removeUnder(root string, names ...string) error {
-	r, err := os.OpenRoot(root)
+func removeUnder(local, root string, names ...string) error {
+	r, err := os.OpenRoot(local)
 	if err != nil {
 		return err
 	}
@@ -115,14 +118,22 @@ func (d *Doctor) applyEmptyFolder(ctx context.Context, data fixData) (string, er
 	if !slices.ContainsFunc(roots, func(r arr.RootFolder) bool { return unmappedIn(r, data.Folder) }) {
 		return "", errors.New(data.App + " no longer lists this as untracked")
 	}
-	if folderKind(data.Folder) != "empty" {
+	here, err := d.local(ctx, data.Folder)
+	if err != nil {
+		return "", err
+	}
+	if folderKind(here) != "empty" {
 		return "", errors.New("the folder isn't empty any more")
 	}
 	var targets []string
-	if _, err := os.Lstat(filepath.Join(data.Folder, leftoverFile)); err == nil {
+	if _, err := os.Lstat(filepath.Join(here, leftoverFile)); err == nil {
 		targets = append(targets, filepath.Join(data.Folder, leftoverFile))
 	}
-	if err := removeUnder(root, append(targets, data.Folder)...); err != nil {
+	localRoot, err := d.local(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	if err := removeUnder(localRoot, root, append(targets, data.Folder)...); err != nil {
 		return "", err
 	}
 	return "removed", nil
@@ -152,7 +163,11 @@ func (d *Doctor) applyStray(ctx context.Context, data fixData) (string, error) {
 	if d.DryRun {
 		return "dry run: would have deleted " + path.Base(data.Folder), nil
 	}
-	if err := removeUnder(root, data.Folder); err != nil {
+	localRoot, err := d.local(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	if err := removeUnder(localRoot, root, data.Folder); err != nil {
 		return "", err
 	}
 	return "deleted " + path.Base(data.Folder), nil

@@ -19,6 +19,7 @@ import (
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/tautulli"
+	"github.com/voidgrid/voidgrid-cleaner/internal/doctor"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -85,6 +86,10 @@ type Worker struct {
 	Now      func() time.Time
 	// AdminChannel says a tech alerts channel is set.
 	AdminChannel bool
+	// Disks reports disk use for the digest; nil leaves it out.
+	Disks interface {
+		Space(context.Context) ([]doctor.Disk, []storage.SpaceItem, error)
+	}
 
 	notifyAfter time.Time
 	spaceAfter  time.Time

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strconv"
@@ -75,7 +76,6 @@ func (w DeleteWindow) Next(t time.Time) time.Time {
 const (
 	settingWindowStart  = "delete_window_start"
 	settingWindowEnd    = "delete_window_end"
-	settingSpaceLimit   = "space_limit_percent"
 	settingAdminDiscord = "admin_discord_id"
 )
 
@@ -109,36 +109,84 @@ func (db *DB) DefaultAdminDiscord(ctx context.Context, id string) error {
 	return err
 }
 
-// DefaultSpaceLimit is the percent of a disk used before space-based items go.
-const DefaultSpaceLimit = 90
+// SpaceRange is when space-based deletions start, as percent of a disk used,
+// and how far down they clear it.
+type SpaceRange struct{ Start, Floor int }
 
-// ParseSpaceLimit reads the percent from the settings form; empty means the default.
-func ParseSpaceLimit(s string) (int, error) {
-	if s == "" {
-		return DefaultSpaceLimit, nil
+// DefaultSpace starts at 75%, where filesystems start to slow down.
+var DefaultSpace = SpaceRange{Start: 75, Floor: 70}
+
+// ParseSpaceRange reads one disk's fields from the settings form; an empty
+// field means its default.
+func ParseSpaceRange(start, floor string) (SpaceRange, error) {
+	r := DefaultSpace
+	for _, f := range []struct {
+		in  string
+		dst *int
+	}{{start, &r.Start}, {floor, &r.Floor}} {
+		if f.in == "" {
+			continue
+		}
+		n, err := strconv.Atoi(f.in)
+		if err != nil || n < 1 || n > 99 {
+			return SpaceRange{}, errors.New("space used must be a percent from 1 to 99")
+		}
+		*f.dst = n
 	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 1 || n > 99 {
-		return 0, errors.New("space used must be a percent from 1 to 99")
+	if r.Floor >= r.Start {
+		return SpaceRange{}, errors.New("space-based deletions must clear down to below where they start")
 	}
-	return n, nil
+	return r, nil
 }
 
-// SpaceLimit returns the saved percent. A bad stored value is an error, so
-// nothing is deleted on a guess.
-func (db *DB) SpaceLimit(ctx context.Context) (int, error) {
-	s, err := db.Setting(ctx, settingSpaceLimit, func() string { return strconv.Itoa(DefaultSpaceLimit) })
+// SpaceRanges are the saved ranges by disk. A disk without one uses DefaultSpace.
+type SpaceRanges map[string]SpaceRange
+
+// For returns a disk's range.
+func (rs SpaceRanges) For(disk string) SpaceRange {
+	if r, ok := rs[disk]; ok {
+		return r
+	}
+	return DefaultSpace
+}
+
+// SpaceRanges returns the saved ranges.
+func (db *DB) SpaceRanges(ctx context.Context) (SpaceRanges, error) {
+	rows, err := db.QueryContext(ctx, `SELECT path, start, floor FROM disk_ranges`)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return ParseSpaceLimit(s)
+	defer func() { _ = rows.Close() }()
+	out := SpaceRanges{}
+	for rows.Next() {
+		var p string
+		var r SpaceRange
+		if err := rows.Scan(&p, &r.Start, &r.Floor); err != nil {
+			return nil, err
+		}
+		out[p] = r
+	}
+	return out, rows.Err()
 }
 
-// SetSpaceLimit saves the percent.
-func (db *DB) SetSpaceLimit(ctx context.Context, percent int) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, settingSpaceLimit, strconv.Itoa(percent))
-	return err
+// SetSpaceRanges saves ranges by disk in one go; nil puts a disk back on the
+// defaults. Disks not named keep what they have.
+func (db *DB) SetSpaceRanges(ctx context.Context, rs map[string]*SpaceRange) error {
+	return db.tx(ctx, func(tx *sql.Tx) error {
+		for p, r := range rs {
+			var err error
+			if r == nil {
+				_, err = tx.ExecContext(ctx, `DELETE FROM disk_ranges WHERE path = ?`, p)
+			} else {
+				_, err = tx.ExecContext(ctx, `INSERT INTO disk_ranges (path, start, floor) VALUES (?, ?, ?)
+					ON CONFLICT (path) DO UPDATE SET start = excluded.start, floor = excluded.floor`, p, r.Start, r.Floor)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteWindow returns the saved window.

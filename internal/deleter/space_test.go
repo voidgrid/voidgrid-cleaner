@@ -2,6 +2,7 @@ package deleter
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,8 +12,9 @@ import (
 )
 
 // spaceSetup has three space-based items of 60 bytes on a 1000-byte pool at
-// 95% used, seen by Radarr and Sonarr through separate mounts, so getting to
-// 90% takes one item, and a fourth on another disk with plenty free.
+// 95% used, seen by Radarr and Sonarr through separate mounts, so with the
+// range 90 to 89 getting down takes one item, and a fourth on another disk
+// with plenty free.
 func spaceSetup(t *testing.T) (*Worker, *fake, *time.Time) {
 	t.Helper()
 	w, f, now := setup(t)
@@ -36,6 +38,9 @@ func spaceSetup(t *testing.T) (*Worker, *fake, *time.Time) {
 		if err := w.DB.SetItemStatus(ctx, k, storage.StatusSpace, 1); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := w.DB.SetSpaceRanges(ctx, map[string]*storage.SpaceRange{"/pool/movies": {Start: 90, Floor: 89}}); err != nil {
+		t.Fatal(err)
 	}
 	f.movies = []arr.Movie{{ID: 1, TmdbID: 1, Path: "/pool/movies/a"}, {ID: 2, TmdbID: 2, Path: "/pool/movies/b"}, {ID: 3, TmdbID: 3, Path: "/spare/c"}}
 	f.series = []arr.Series{{ID: 4, TvdbID: 4, Path: "/pool/tv/d"}}
@@ -75,10 +80,57 @@ func TestSpaceSchedulesOnlyWhatsNeeded(t *testing.T) {
 	}
 }
 
+func TestSpaceTicksFirstThenLongestUnwatchedToTheFloor(t *testing.T) {
+	w, _, _ := spaceSetup(t)
+	ctx := context.Background()
+	// Clearing 95% down to 80% needs 150 bytes: three items on the pool.
+	if err := w.DB.SetSpaceRanges(ctx, map[string]*storage.SpaceRange{"/pool/movies": {Start: 90, Floor: 80}}); err != nil {
+		t.Fatal(err)
+	}
+	for k, st := range map[string]string{"1": storage.StatusNormal, "2": storage.StatusNormal, "3": storage.StatusNormal} {
+		if err := w.DB.SetItemStatus(ctx, k, st, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Tick(ctx)
+	got := strings.Fields(activeKeys(t, w))
+	slices.Sort(got)
+	if strings.Join(got, " ") != "1 2 4" {
+		t.Fatalf("active %v, want the ticked show then the two longest unwatched on the pool", got)
+	}
+}
+
+func TestSpaceFallbackSkipsKeepAndTakesOnlyWhatsNeeded(t *testing.T) {
+	w, _, _ := spaceSetup(t)
+	ctx := context.Background()
+	for k, st := range map[string]string{"1": storage.StatusKeep, "2": storage.StatusNormal, "3": storage.StatusNormal, "4": storage.StatusNormal} {
+		if err := w.DB.SetItemStatus(ctx, k, st, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Tick(ctx)
+	if got := activeKeys(t, w); got != "2" {
+		t.Fatalf("active %q, want the longest unwatched that isn't kept", got)
+	}
+}
+
+func TestSpaceRangeIsPerDisk(t *testing.T) {
+	w, _, _ := spaceSetup(t)
+	ctx := context.Background()
+	// The pool is under its start; the spare disk, 44% used, is past its own.
+	if err := w.DB.SetSpaceRanges(ctx, map[string]*storage.SpaceRange{"/pool/movies": {Start: 96, Floor: 80}, "/spare": {Start: 40, Floor: 30}}); err != nil {
+		t.Fatal(err)
+	}
+	w.Tick(ctx)
+	if got := activeKeys(t, w); got != "3" {
+		t.Fatalf("active %q, want only the item on the spare disk", got)
+	}
+}
+
 func TestSpaceUnderLimitDoesNothing(t *testing.T) {
 	w, _, _ := spaceSetup(t)
 	ctx := context.Background()
-	if err := w.DB.SetSpaceLimit(ctx, 96); err != nil {
+	if err := w.DB.SetSpaceRanges(ctx, map[string]*storage.SpaceRange{"/pool/movies": {Start: 96, Floor: 80}}); err != nil {
 		t.Fatal(err)
 	}
 	w.Tick(ctx)

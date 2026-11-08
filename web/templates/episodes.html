@@ -1,0 +1,25 @@
+{{define "content"}}
+{{with .Episodes}}
+<h1>{{.Show.Title}}: episodes</h1>
+<div data-live>
+<p class="muted">delete single episodes by hand. each goes through the usual notice and delay, named on its own, and sonarr stops monitoring it so it isn't downloaded again. <a href="/library/{{.Show.SectionKey}}#card-{{.Show.RatingKey}}">back to the library</a></p>
+{{if .Episodes}}
+<table>
+    <thead><tr><th>episode</th><th>title</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+    <tbody>
+    {{range .Episodes}}
+    <tr>
+        <td>S{{printf "%02d" .Season}}E{{printf "%02d" .Number}}</td>
+        <td>{{.Title}}</td>
+        <td>{{if .Deletion}}<span class="badge">deleting</span> {{if .Deletion.DeleteAfter}}<span class="muted">{{when .Deletion.DeleteAfter}}</span>{{end}}{{if ne .Deletion.State "executing"}} <form class="inline-form" method="post" action="/library/item/{{$.Episodes.Show.RatingKey}}/episodes/{{.RatingKey}}/cancel"><button type="submit" aria-label="cancel deleting S{{printf "%02d" .Season}}E{{printf "%02d" .Number}}">cancel delete</button></form>{{end}}
+        {{else}}<form class="inline-form" method="post" action="/library/item/{{$.Episodes.Show.RatingKey}}/episodes/{{.RatingKey}}/delete"><button type="submit" aria-label="delete S{{printf "%02d" .Season}}E{{printf "%02d" .Number}}">delete</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="muted">plex lists no episodes for this show.</p>
+{{end}}
+</div>
+{{end}}
+{{end}}

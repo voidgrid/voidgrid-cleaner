@@ -125,7 +125,7 @@ func (db *DB) DigestData(ctx context.Context, since, now time.Time, dryRun bool)
 		return d, err
 	}
 	for _, s := range space {
-		if !s.Active {
+		if s.Ticked && !s.Active {
 			d.SpaceQueue++
 		}
 	}

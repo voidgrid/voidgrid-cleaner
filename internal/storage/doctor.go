@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -88,6 +91,48 @@ type LibraryPath struct {
 	Media                       bool // holds a video library, so it can be managed
 	Visible, Writable, Verified bool
 	Managed                     bool
+	// Local is where the app sees Path, if it's mounted somewhere else here.
+	Local string
+}
+
+// Local turns a path as the services see it into where the app sees it,
+// through the longest mapped library path holding it.
+func Local(paths []LibraryPath, p string) string {
+	best := -1
+	for i, lp := range paths {
+		if lp.Local != "" && (p == lp.Path || strings.HasPrefix(p, lp.Path+"/")) && (best < 0 || len(lp.Path) > len(paths[best].Path)) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return p
+	}
+	return paths[best].Local + strings.TrimPrefix(p, paths[best].Path)
+}
+
+// ValidLocal says what's wrong with a mapping, if anything: it must be an
+// absolute, clean path. Empty means no mapping.
+func ValidLocal(p string) error {
+	if p != "" && (!path.IsAbs(p) || path.Clean(p) != p || p == "/") {
+		return fmt.Errorf("%q must be a full path, like /media/movies", p)
+	}
+	return nil
+}
+
+// SetLocalPaths saves where the app sees each path; empty clears a mapping.
+// Paths not named keep theirs.
+func (db *DB) SetLocalPaths(ctx context.Context, local map[string]string) error {
+	return db.tx(ctx, func(tx *sql.Tx) error {
+		for p, l := range local {
+			if err := ValidLocal(l); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE library_paths SET local = ? WHERE path = ?`, l, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // SaveLibraryPaths replaces the inferred paths, keeping each one's managed
@@ -112,7 +157,7 @@ func (db *DB) SaveLibraryPaths(ctx context.Context, ps []LibraryPath) error {
 
 // LibraryPaths lists the known paths.
 func (db *DB) LibraryPaths(ctx context.Context) ([]LibraryPath, error) {
-	rows, err := db.QueryContext(ctx, `SELECT path, used_by, media, visible, writable, verified, managed FROM library_paths ORDER BY path`)
+	rows, err := db.QueryContext(ctx, `SELECT path, used_by, media, visible, writable, verified, managed, local FROM library_paths ORDER BY path`)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +165,7 @@ func (db *DB) LibraryPaths(ctx context.Context) ([]LibraryPath, error) {
 	var out []LibraryPath
 	for rows.Next() {
 		var p LibraryPath
-		if err := rows.Scan(&p.Path, &p.UsedBy, &p.Media, &p.Visible, &p.Writable, &p.Verified, &p.Managed); err != nil {
+		if err := rows.Scan(&p.Path, &p.UsedBy, &p.Media, &p.Visible, &p.Writable, &p.Verified, &p.Managed, &p.Local); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

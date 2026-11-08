@@ -28,15 +28,25 @@
     {{end}}
 </section>
 
+{{if .Mounts}}
+<section class="card-panel">
+    <h2>mounts</h2>
+    <p class="flash-error">some paths radarr, sonarr or plex use aren't mounted here, or not where they say. disk checks, fixes and download folder sizes skip them.</p>
+    <ul>{{range .Mounts}}<li>{{.Title}}: <span class="muted">{{.Detail}}</span></li>{{end}}</ul>
+    <p><a href="/settings">map them under library paths</a>, or <a href="/doctor">dismiss them on the doctor page</a> if they aren't needed here.</p>
+</section>
+{{end}}
+
 <section class="card-panel">
     <h2>space</h2>
     {{if .SpaceError}}<p class="flash-error">{{.SpaceError}}</p>{{end}}
-    {{range .Disks}}<p>{{.Path}}: {{.Used}}% used, {{gb .Free}} free <span class="muted">(limit {{.Limit}}%)</span></p>{{end}}
+    {{range .Disks}}<p>{{.Path}}: {{.Used}}% used, {{gb .Free}} free <span class="muted">{{if .DownloadsOnly}}(downloads only, so deletions don't free it){{else}}(deletions start at {{.Range.Start}}%, clearing to {{.Range.Floor}}%){{end}}</span></p>
+    {{range .Downloads}}<p class="muted">{{.Path}} on this disk holds {{gb .Bytes}}.</p>{{end}}{{end}}
     {{if .SpaceQueue}}
-    <p class="muted">space-based items, in the order they'd go:</p>
+    <p class="muted">space-based items, in the order they'd go; if they aren't enough, the longest unwatched follow:</p>
     <ol>{{range .SpaceQueue}}<li>{{.Title}} <span class="muted">{{gb .SizeBytes}}</span></li>{{end}}</ol>
     {{else}}
-    <p class="muted">nothing is space-based.</p>
+    <p class="muted">nothing is space-based, so the longest unwatched would go.</p>
     {{end}}
 </section>
 

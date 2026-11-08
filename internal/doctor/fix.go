@@ -37,6 +37,8 @@ type fixData struct {
 	Episodes   []int64 `json:"episodes,omitempty"`
 	DownloadID string  `json:"download_id,omitempty"`
 	QueueIDs   []int64 `json:"queue_ids,omitempty"`
+	// Blocked is a download that won't finish without someone acting.
+	Blocked bool `json:"blocked,omitempty"`
 	// Resolution is what Plex measured, as Plex writes it.
 	Resolution string `json:"resolution,omitempty"`
 }
@@ -103,7 +105,7 @@ func (d *Doctor) Preview(ctx context.Context, f storage.Finding) (Preview, error
 		return p, d.previewArr(ctx, &p, data)
 	}
 	if isDiskFix(f) {
-		d.previewDisk(&p, data)
+		d.previewDisk(ctx, &p, data)
 		return p, nil
 	}
 	if f.Kind == KindStuck {

@@ -276,7 +276,7 @@ func (s *snapshot) unmapped() []unmappedFolder {
 func (s *snapshot) untracked() []storage.Finding {
 	var out []storage.Finding
 	for _, u := range s.unmapped() {
-		if s.inManaged(u.path) && folderKind(u.path) == "empty" {
+		if s.inManaged(u.path) && folderKind(s.local(u.path)) == "empty" {
 			continue // reported as an empty folder
 		}
 		out = append(out, storage.Finding{
@@ -287,10 +287,38 @@ func (s *snapshot) untracked() []storage.Finding {
 	return out
 }
 
+// notManaged finds Plex items Radarr or Sonarr don't have, outside their
+// root folders. One inside a root folder is an untracked folder, which can be
+// imported; these can't be until they're moved under one.
+func (s *snapshot) notManaged() []storage.Finding {
+	unmapped := map[string]bool{}
+	for _, u := range s.unmapped() {
+		unmapped[u.path] = true
+	}
+	var out []storage.Finding
+	s.forEachItem(func(lib library, it plex.Item, _ counterpart, ok bool) {
+		if ok {
+			return
+		}
+		folder := s.showPaths[it.RatingKey]
+		if files := it.Files(); lib.section.Type == "movie" && len(files) > 0 {
+			folder = path.Dir(files[0])
+		}
+		if unmapped[folder] {
+			return
+		}
+		out = append(out, storage.Finding{
+			Subject: it.RatingKey, Title: it.Title, Severity: problem,
+			Detail: fmt.Sprintf("Plex has it at %s, which isn't under a %s root folder, so %s can't import it. Move it under one; the doctor then offers the import.", folder, arrName(lib), arrName(lib)),
+		})
+	})
+	return out
+}
+
 func (s *snapshot) emptyFolders() []storage.Finding {
 	var out []storage.Finding
 	for _, u := range s.unmapped() {
-		if s.inManaged(u.path) && folderKind(u.path) == "empty" {
+		if s.inManaged(u.path) && folderKind(s.local(u.path)) == "empty" {
 			out = append(out, storage.Finding{Subject: u.path, Title: path.Base(u.path), Severity: note, Detail: u.path, Data: encode(fixData{App: u.app, Folder: u.path, Root: u.root})})
 		}
 	}
@@ -313,7 +341,9 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 			tracked[f.Path] = true
 		}
 		// A series folder that can't be read is skipped, like a movie's below.
-		_ = filepath.WalkDir(sr.Path, func(p string, e fs.DirEntry, err error) error {
+		here := s.local(sr.Path)
+		_ = filepath.WalkDir(here, func(p string, e fs.DirEntry, err error) error {
+			p = sr.Path + strings.TrimPrefix(p, here) // back to how Sonarr names it
 			if err == nil && !e.IsDir() && isVideoFile(p) && !tracked[p] {
 				out = append(out, storage.Finding{
 					Subject: p, Title: e.Name(), Severity: check, Detail: "In " + sr.Title + "'s folder, and Sonarr doesn't track it.",
@@ -327,7 +357,7 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 		if !s.inManaged(m.Path) {
 			continue
 		}
-		entries, err := os.ReadDir(m.Path)
+		entries, err := os.ReadDir(s.local(m.Path))
 		if err != nil {
 			continue
 		}

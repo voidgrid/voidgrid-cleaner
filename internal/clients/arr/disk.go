@@ -23,6 +23,17 @@ func DiskFor(disks []DiskSpace, path string) (DiskSpace, bool) {
 	return best, found
 }
 
+// Canonical names a disk by the first entry in all on the same filesystem,
+// so every caller gives one disk the same name however it was reached.
+func Canonical(all []DiskSpace, d DiskSpace) DiskSpace {
+	for _, o := range all {
+		if o.Path != "/" && SameFS(o, d) {
+			return o
+		}
+	}
+	return d
+}
+
 // SameFS spots one filesystem seen through two mounts, such as a movies and a
 // TV folder on one pool, so its use isn't counted once for each. Two matching
 // disks would be taken as one, which only ever deletes less.

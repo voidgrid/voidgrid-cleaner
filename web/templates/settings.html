@@ -8,8 +8,16 @@
     <label>from <input type="time" name="window_start" value="{{.Window.Start}}"></label>
     <label>until <input type="time" name="window_end" value="{{.Window.End}}"></label>
     <h2>space-based</h2>
-    <p class="muted">when a disk is used past this level, space-based items on it are scheduled for deletion, oldest watched first, until enough is going to get back under it. checked every hour, with the usual notice and delay. default: {{.DefaultSpace}}%; leave empty to use it.</p>
-    <label>space used (%) <input type="number" name="space_limit" min="1" max="99" value="{{.SpaceLimit}}"></label>
+    <p class="muted">when a disk reaches its start level, enough on it is scheduled for deletion to bring it down to its floor: space-based items first, oldest watched first, then if they aren't enough, the longest unwatched of everything else not kept. checked every hour, with the usual notice and delay. each disk has its own range; defaults: start {{.DefaultSpace.Start}}%, floor {{.DefaultSpace.Floor}}%. leave a field empty to use its default.</p>
+    {{if .DiskError}}<p class="flash-error">{{.DiskError}}</p>{{end}}
+    {{range .Disks}}
+    <fieldset>
+        <legend>{{.Path}}</legend>
+        <input type="hidden" name="disk" value="{{.Path}}">
+        <label>start at (% used) <input type="number" name="space_start" min="2" max="99" value="{{.Start}}"></label>
+        <label>clear down to (% used) <input type="number" name="space_floor" min="1" max="98" value="{{.Floor}}"></label>
+    </fieldset>
+    {{else}}{{if not .DiskError}}<p class="muted">no disk holding a library has been seen yet.</p>{{end}}{{end}}
     <h2>admin notices</h2>
     <p class="muted">who gets tagged on discord when someone unlinked presses add me. a discord user ID. default: the server owner.</p>
     <label>discord user <input type="text" name="admin_discord" inputmode="numeric" value="{{.AdminDiscord}}"></label>
@@ -29,9 +37,10 @@
     <label>keep for (days) <input type="number" name="log_expiry" min="1" max="3650" value="{{.LogExpiry}}"></label>
     <h2>library paths</h2>
     <p class="muted">every path plex, radarr and sonarr use, checked on each doctor run. verified means a file they list really is here. the doctor only looks inside, and only ever changes, paths you tick that are verified. music and photos can't be ticked.</p>
+    <p class="muted">mount each one into this container at the same path if you can. if one is mounted somewhere else here, put where under "mounted here at"; leave it empty when it's the same. a mapping covers everything under its path. saving starts a doctor run to check it.</p>
     {{if .Paths}}
     <table>
-        <thead><tr><th>path</th><th>used by</th><th>can see</th><th>can write</th><th>verified</th><th>managed</th></tr></thead>
+        <thead><tr><th>path</th><th>used by</th><th>can see</th><th>can write</th><th>verified</th><th>mounted here at</th><th>managed</th></tr></thead>
         <tbody>
         {{range .Paths}}
         <tr>
@@ -39,6 +48,7 @@
             <td>{{if .Visible}}yes{{else}}<span class="badge">no</span>{{end}}</td>
             <td>{{if .Writable}}yes{{else}}no{{end}}</td>
             <td>{{if .Verified}}yes{{else}}no{{end}}</td>
+            <td><input type="hidden" name="path" value="{{.Path}}"><input type="text" name="local" value="{{.Local}}" placeholder="same path" aria-label="where {{.Path}} is mounted here"></td>
             <td>{{if .Media}}<input type="checkbox" name="managed" value="{{.Path}}" aria-label="manage {{.Path}}"{{if .Managed}} checked{{end}}>{{else}}<span class="muted">n/a</span>{{end}}</td>
         </tr>
         {{end}}

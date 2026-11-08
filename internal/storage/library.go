@@ -510,8 +510,9 @@ func (db *DB) SetItemStatus(ctx context.Context, ratingKey, status string, by in
 			ratingKey, status, by, now); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE deletions SET state = ?, finished_at = ? WHERE rating_key = ? AND state IN (?, ?)`,
-			DeletionCancelled, now, ratingKey, DeletionScheduled, DeletionNotified)
+		// Keep on a show also stops its episodes going.
+		_, err := tx.ExecContext(ctx, `UPDATE deletions SET state = ?, finished_at = ? WHERE (rating_key = ? OR (parent_key = ? AND ? = ?)) AND state IN (?, ?)`,
+			DeletionCancelled, now, ratingKey, ratingKey, status, StatusKeep, DeletionScheduled, DeletionNotified)
 		return err
 	})
 }
