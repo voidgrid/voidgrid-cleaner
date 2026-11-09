@@ -41,7 +41,6 @@ const (
 	KindHealth          = "arr_health"
 	KindMissing         = "missing"
 	KindSettings        = "settings_drift"
-	KindBlocklist       = "blocklist"
 	KindWatchDrift      = "watch_drift"
 	KindNotManaged      = "not_managed"
 )
@@ -65,7 +64,6 @@ var Labels = []struct{ Kind, Label string }{
 	{KindStrayFile, "stray file"},
 	{KindEmptyFolder, "empty folder"},
 	{KindSettings, "settings"},
-	{KindBlocklist, "blocklist"},
 	{KindWatchDrift, "plex and tautulli disagree"},
 }
 
@@ -81,7 +79,6 @@ type (
 		RootFolders(context.Context) ([]arr.RootFolder, error)
 		DiskSpace(context.Context) ([]arr.DiskSpace, error)
 		Health(context.Context) ([]arr.Health, error)
-		BlocklistSize(context.Context) (int, error)
 		MediaManagement(context.Context) (arr.MediaManagement, error)
 		Queue(context.Context) ([]arr.QueueRecord, error)
 		RemoveQueue(ctx context.Context, ids []int64, blocklist, skipRedownload bool) error
@@ -158,7 +155,6 @@ type arrState struct {
 	roots    []arr.RootFolder
 	disks    []arr.DiskSpace
 	health   []arr.Health
-	block    int
 	settings arr.MediaManagement
 }
 
@@ -170,9 +166,6 @@ func readArr(ctx context.Context, a ArrAPI) (s arrState, err error) {
 		return s, err
 	}
 	if s.health, err = a.Health(ctx); err != nil {
-		return s, err
-	}
-	if s.block, err = a.BlocklistSize(ctx); err != nil {
 		return s, err
 	}
 	s.settings, err = a.MediaManagement(ctx)
@@ -314,7 +307,6 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	save(arrs, KindHealth, s.health)
 	save(arrs, KindMissing, s.missing)
 	save(all, KindSettings, s.settings)
-	save(arrs, KindBlocklist, s.blocklist)
 	tryFind(arrs, KindNaming, func() ([]storage.Finding, error) { return d.naming(ctx, &s) })
 	tryFind(all, KindStaleRequest, func() ([]storage.Finding, error) { return d.staleRequests(ctx, &s) })
 	tryFind(true, KindWatchDrift, func() ([]storage.Finding, error) { return d.watchDrift(ctx) })

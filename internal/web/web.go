@@ -329,6 +329,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/doctor/check", s.doctorCheck)
 			r.Get("/doctor/preview", s.doctorPreview)
 			r.Post("/doctor/apply", s.doctorApply)
+			r.Post("/doctor/dismiss", s.dismissFindings)
 			r.Post("/doctor/{id}/dismiss", s.setFinding("dismissed"))
 			r.Post("/doctor/{id}/open", s.setFinding("open"))
 			r.Get("/log", s.auditLog)
@@ -888,6 +889,30 @@ func (s *Server) doctorApply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) doctorCheck(w http.ResponseWriter, r *http.Request) {
 	if s.DoctorNow != nil {
 		s.DoctorNow()
+	}
+	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
+}
+
+// dismissFindings dismisses every ticked finding.
+func (s *Server) dismissFindings(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	var ids []int64
+	for _, v := range r.PostForm["id"] {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if err := s.DB.SetFindingsState(r.Context(), ids, "dismissed"); err != nil {
+		log.Printf("web: dismiss findings: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if len(ids) > 0 {
+		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "doctor findings dismissed", strings.Join(r.PostForm["id"], ","), "")
 	}
 	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
 }

@@ -85,6 +85,21 @@ func (db *DB) SetFindingState(ctx context.Context, id int64, state string) (bool
 	return changed(db.ExecContext(ctx, `UPDATE findings SET state = ? WHERE id = ? AND state <> 'resolved'`, state, id))
 }
 
+// SetFindingsState dismisses or reopens several findings in one transaction.
+func (db *DB) SetFindingsState(ctx context.Context, ids []int64, state string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE findings SET state = ? WHERE id = ? AND state <> 'resolved'`, state, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // LibraryPath is one path a service uses, as last checked.
 type LibraryPath struct {
 	Path, UsedBy                string

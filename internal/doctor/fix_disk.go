@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -106,17 +107,8 @@ func (d *Doctor) applyEmptyFolder(ctx context.Context, data fixData) (string, er
 	if err != nil {
 		return "", err
 	}
-	// Checked again here: something may have claimed the folder since.
-	var a ArrAPI = d.Radarr
-	if data.App == appSonarr {
-		a = d.Sonarr
-	}
-	roots, err := a.RootFolders(ctx)
-	if err != nil {
+	if err := d.stillUntracked(ctx, data); err != nil {
 		return "", err
-	}
-	if !slices.ContainsFunc(roots, func(r arr.RootFolder) bool { return unmappedIn(r, data.Folder) }) {
-		return "", errors.New(data.App + " no longer lists this as untracked")
 	}
 	here, err := d.local(ctx, data.Folder)
 	if err != nil {
@@ -137,6 +129,78 @@ func (d *Doctor) applyEmptyFolder(ctx context.Context, data fixData) (string, er
 		return "", err
 	}
 	return "removed", nil
+}
+
+// stillUntracked asks again right before a removal: something may have
+// claimed the folder since.
+func (d *Doctor) stillUntracked(ctx context.Context, data fixData) error {
+	var a ArrAPI = d.Radarr
+	if data.App == appSonarr {
+		a = d.Sonarr
+	}
+	roots, err := a.RootFolders(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(roots, func(r arr.RootFolder) bool { return unmappedIn(r, data.Folder) }) {
+		return errors.New(data.App + " no longer lists this as untracked")
+	}
+	return nil
+}
+
+// folderEntries lists everything under dir, relative to it, parents before
+// their contents.
+func folderEntries(dir string) ([]string, error) {
+	var names []string
+	err := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if rel, _ := filepath.Rel(dir, p); rel != "." {
+			names = append(names, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return names, err
+}
+
+// applyRemoveFolder removes an untracked folder holding no video, one entry
+// at a time and deepest first, so nothing is removed recursively.
+func (d *Doctor) applyRemoveFolder(ctx context.Context, data fixData) (string, error) {
+	root, err := d.managedRoot(ctx, data.Folder)
+	if err != nil {
+		return "", err
+	}
+	if err := d.stillUntracked(ctx, data); err != nil {
+		return "", err
+	}
+	here, err := d.local(ctx, data.Folder)
+	if err != nil {
+		return "", err
+	}
+	names, err := folderEntries(here)
+	if err != nil {
+		return "", err
+	}
+	targets := []string{data.Folder}
+	for _, n := range names {
+		if isVideoFile(n) {
+			return "", errors.New("a video has appeared in it, so it was left alone")
+		}
+		targets = append(targets, path.Join(data.Folder, n))
+	}
+	if d.DryRun {
+		return fmt.Sprintf("dry run: would have removed %s and %d things in it", path.Base(data.Folder), len(names)), nil
+	}
+	slices.Reverse(targets)
+	localRoot, err := d.local(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	if err := removeUnder(localRoot, root, targets...); err != nil {
+		return "", err
+	}
+	return "removed " + path.Base(data.Folder), nil
 }
 
 func unmappedIn(r arr.RootFolder, folder string) bool {

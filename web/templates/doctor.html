@@ -1,19 +1,22 @@
 {{define "content"}}
 <h1>doctor</h1>
-<form id="fix" method="get" action="/doctor/preview"><button type="submit">preview ticked fixes</button></form>
+<form id="fix" method="get" action="/doctor/preview"></form>
 <div data-live>
 {{with .Doctor}}
 <form class="inline-form" method="post" action="/doctor/check"><button type="submit">check now</button></form>
 <p class="muted">runs after each sync. {{if .Dismissed}}<a href="/doctor">show open</a>{{else}}{{if .DismissedCount}}<a href="/doctor?dismissed=1">show {{.DismissedCount}} dismissed</a>{{end}}{{end}}</p>
 {{range .Groups}}
+<section>
 <h2>{{.Label}} <span class="muted">({{len .Findings}})</span></h2>
-{{if and .Fixable (not $.Doctor.Dismissed)}}<button type="button" data-tick-all>tick all</button>{{end}}
+{{if not $.Doctor.Dismissed}}<p class="actions"><button type="button" data-tick-all>tick all</button>
+{{if .Fixable}}<button type="submit" form="fix">preview ticked fixes</button>{{end}}
+<button type="submit" form="fix" formmethod="post" formaction="/doctor/dismiss">dismiss ticked</button></p>{{end}}
 <table>
     <thead><tr><th><span class="visually-hidden">fix</span></th><th>item</th><th>what's wrong</th><th><span class="visually-hidden">actions</span></th></tr></thead>
     <tbody>
     {{range .Findings}}
     <tr>
-        <td>{{if and (not $.Doctor.Dismissed) (fixable .Kind .Subject)}}<input type="checkbox" form="fix" name="id" value="{{.ID}}" aria-label="fix {{.Title}}">{{end}}</td>
+        <td>{{if not $.Doctor.Dismissed}}<input type="checkbox" form="fix" name="id" value="{{.ID}}" aria-label="tick {{.Title}}">{{end}}</td>
         <td>{{.Title}}{{if eq .Severity "problem"}} <span class="badge">problem</span>{{end}}</td>
         <td class="muted">{{.Detail}}</td>
         <td>{{if $.Doctor.Dismissed}}<form class="inline-form" method="post" action="/doctor/{{.ID}}/open"><button type="submit" aria-label="reopen {{.Title}}">reopen</button></form>{{else}}<form class="inline-form" method="post" action="/doctor/{{.ID}}/dismiss"><button type="submit" aria-label="dismiss {{.Title}}">dismiss</button></form>{{end}}</td>
@@ -21,6 +24,7 @@
     {{end}}
     </tbody>
 </table>
+</section>
 {{else}}
 <p class="muted">{{if .Dismissed}}nothing dismissed.{{else}}nothing to report.{{end}}</p>
 {{end}}

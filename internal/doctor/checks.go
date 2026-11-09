@@ -484,16 +484,6 @@ func (s *snapshot) settings() []storage.Finding {
 	return out
 }
 
-func (s *snapshot) blocklist() []storage.Finding {
-	var out []storage.Finding
-	for name, st := range map[string]arrState{"radarr": s.radarr, "sonarr": s.sonarr} {
-		if st.block > 0 {
-			out = append(out, storage.Finding{Subject: name, Title: fmt.Sprintf("%s: %d blocked releases", name, st.block), Severity: note, Detail: "Blocked releases are never grabbed again."})
-		}
-	}
-	return out
-}
-
 const renameBatch = 80
 
 func (d *Doctor) naming(ctx context.Context, s *snapshot) ([]storage.Finding, error) {

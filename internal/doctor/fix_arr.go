@@ -22,6 +22,8 @@ const (
 	emptyFoldersSubject = "radarr:empty"
 	// commandTries with FixWait/6 between them allows about a minute at 3 s.
 	commandTries = 120
+	// removeChoice removes an untracked show folder with no video instead of adding it.
+	removeChoice = "remove"
 )
 
 // importQualities are the ones a manual import offers, most likely first.
@@ -65,7 +67,9 @@ func (d *Doctor) previewUntracked(ctx context.Context, p *Preview, data fixData)
 	if err != nil {
 		return err
 	}
-	if found, ok := hasVideo(here); ok && !found {
+	found, ok := hasVideo(here)
+	noVideo := ok && !found
+	if noVideo && data.App != appSonarr {
 		p.Lines = []string{"There's no video in " + data.Folder + ", so there's nothing to add."}
 		return nil
 	}
@@ -93,7 +97,39 @@ func (d *Doctor) previewUntracked(ctx context.Context, p *Preview, data fixData)
 	if !p.CanFix {
 		p.Lines = []string{"Nothing found for " + term + ", so this can't be added automatically."}
 	}
+	if noVideo {
+		d.previewRemoveFolder(ctx, p, data, here)
+	}
 	return nil
+}
+
+// previewRemoveFolder offers removing a show folder with no video, beside
+// adding it to Sonarr.
+func (d *Doctor) previewRemoveFolder(ctx context.Context, p *Preview, data fixData, here string) {
+	p.Lines = append([]string{"There's no video in " + data.Folder + "."}, p.Lines...)
+	if _, err := d.managedRoot(ctx, data.Folder); err != nil {
+		p.Lines = append(p.Lines, "Removing it needs its library path managed on settings.")
+		return
+	}
+	names, err := folderEntries(here)
+	if err != nil {
+		p.Lines = append(p.Lines, "Couldn't read it: "+err.Error())
+		return
+	}
+	p.CanFix = true
+	p.Choices = append(p.Choices, Choice{Value: removeChoice, Label: "remove the folder"})
+	line := "Or remove the folder for good"
+	if len(names) > 0 {
+		shown := names[:min(len(names), 10)]
+		line += ", with " + strings.Join(shown, ", ")
+		if more := len(names) - len(shown); more > 0 {
+			line += fmt.Sprintf(" and %d more", more)
+		}
+	}
+	p.Lines = append(p.Lines, line+". If a video appears in it by then, it's left alone.")
+	if d.DryRun {
+		p.Lines = append(p.Lines, "This is a dry run, so removing will only report what it would delete.")
+	}
 }
 
 func (d *Doctor) previewImport(ctx context.Context, p *Preview, data fixData) error {
@@ -209,6 +245,9 @@ func (d *Doctor) applyRename(ctx context.Context, data fixData) (string, error) 
 }
 
 func (d *Doctor) applyAdd(ctx context.Context, data fixData, choice string) (string, error) {
+	if choice == removeChoice && data.App == appSonarr {
+		return d.applyRemoveFolder(ctx, data)
+	}
 	if _, err := strconv.ParseInt(choice, 10, 64); err != nil {
 		return "", errors.New("nothing chosen to add")
 	}

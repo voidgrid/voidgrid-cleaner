@@ -88,20 +88,6 @@ func (c *Client) Health(ctx context.Context) ([]Health, error) {
 	return out, err
 }
 
-// total reads a paged endpoint's record count.
-func (c *Client) total(ctx context.Context, path string) (int, error) {
-	var out struct {
-		TotalRecords int `json:"totalRecords"`
-	}
-	err := c.call(ctx, http.MethodGet, path, nil, &out)
-	return out.TotalRecords, err
-}
-
-// BlocklistSize counts blocked releases.
-func (c *Client) BlocklistSize(ctx context.Context) (int, error) {
-	return c.total(ctx, "/api/v3/blocklist?pageSize=1")
-}
-
 // MediaManagement is the part of those settings the doctor checks.
 type MediaManagement struct {
 	RecycleBin              string `json:"recycleBin"`

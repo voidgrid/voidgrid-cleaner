@@ -994,6 +994,26 @@ func TestDoctorAndLogPages(t *testing.T) {
 	if fs, _ := s.DB.Findings(ctx, "open"); len(fs) != 0 {
 		t.Fatalf("a dismissed finding came back: %+v", fs)
 	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindHealth, []storage.Finding{{Subject: "a", Title: "One", Severity: "note"}, {Subject: "b", Title: "Two", Severity: "note"}, {Subject: "c", Title: "Three", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	b = body(t, get(t, c, app.URL+"/doctor"))
+	if !strings.Contains(b, `formaction="/doctor/dismiss"`) || strings.Contains(b, "preview ticked fixes") {
+		t.Fatalf("no section buttons: %s", b)
+	}
+	fs, _ = s.DB.Findings(ctx, "open")
+	ticked := url.Values{}
+	for _, f := range fs {
+		if f.Title != "Three" {
+			ticked.Add("id", strconv.FormatInt(f.ID, 10))
+		}
+	}
+	if resp := postForm(t, c, app.URL+"/doctor/dismiss", ticked); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("dismiss ticked: %d", resp.StatusCode)
+	}
+	if fs, _ := s.DB.Findings(ctx, "open"); len(fs) != 1 || fs[0].Title != "Three" {
+		t.Fatalf("dismiss ticked: %+v", fs)
+	}
 
 	if resp := postForm(t, c, app.URL+"/library/item/10/keep", url.Values{}); resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("keep: %d", resp.StatusCode)
@@ -1043,7 +1063,7 @@ func TestDoctorPreviewAndApply(t *testing.T) {
 	if err := s.DB.SaveFindings(ctx, doctor.KindWrongMatch, []storage.Finding{{Subject: "1", Title: "Bad Match", Severity: "problem"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DB.SaveFindings(ctx, doctor.KindBlocklist, []storage.Finding{{Subject: "2", Title: "Report Only", Severity: "note"}}); err != nil {
+	if err := s.DB.SaveFindings(ctx, doctor.KindNotManaged, []storage.Finding{{Subject: "2", Title: "Report Only", Severity: "note"}}); err != nil {
 		t.Fatal(err)
 	}
 	fs, _ := s.DB.Findings(ctx, "open")
@@ -1056,7 +1076,7 @@ func TestDoctorPreviewAndApply(t *testing.T) {
 		}
 	}
 	b := body(t, get(t, c, app.URL+"/doctor"))
-	if !strings.Contains(b, `form="fix" name="id" value="`+fixable+`"`) || strings.Contains(b, `value="`+reportOnly+`"`) {
+	if !strings.Contains(b, `form="fix" name="id" value="`+fixable+`"`) || !strings.Contains(b, `form="fix" name="id" value="`+reportOnly+`"`) {
 		t.Fatalf("checkboxes: %s", b)
 	}
 	b = body(t, get(t, c, app.URL+"/doctor/preview?id="+fixable+"&id="+reportOnly))

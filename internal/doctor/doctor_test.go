@@ -42,8 +42,6 @@ func (f *fakeArr) DiskSpace(context.Context) ([]arr.DiskSpace, error) { return f
 
 func (f *fakeArr) Health(context.Context) ([]arr.Health, error) { return f.state.health, nil }
 
-func (f *fakeArr) BlocklistSize(context.Context) (int, error) { return f.state.block, nil }
-
 func (f *fakeArr) MediaManagement(context.Context) (arr.MediaManagement, error) {
 	return f.state.settings, nil
 }
@@ -524,7 +522,6 @@ func TestStaleRequest(t *testing.T) {
 func TestSettingsAndReports(t *testing.T) {
 	w := newWorld(t)
 	w.radarr.state.settings = arr.MediaManagement{CreateEmptyMovieFolders: true}
-	w.radarr.state.block = 3
 	w.radarr.state.health = []arr.Health{{Source: "IndexerCheck", Type: "error", Message: "no indexers", WikiURL: "https://wiki/x"}}
 	w.sonarr.episodes = []arr.MissingEpisode{{ID: 1, SeriesID: 3, SeasonNumber: 7, EpisodeNumber: 2, Title: "Chrysalis"}}
 	w.sonarr.episodes[0].Series.Title = "Miraculous"
@@ -535,7 +532,7 @@ func TestSettingsAndReports(t *testing.T) {
 	if fs := w.open(t, KindSettings); len(fs) != 3 {
 		t.Fatalf("%+v", fs)
 	}
-	for kind, want := range map[string]int{KindBlocklist: 1, KindHealth: 1, KindNaming: 1, KindMissing: 2} {
+	for kind, want := range map[string]int{KindHealth: 1, KindNaming: 1, KindMissing: 2} {
 		if fs := w.open(t, kind); len(fs) != want {
 			t.Fatalf("%s: %+v", kind, fs)
 		}
@@ -547,24 +544,24 @@ func TestFailedSourceKeepsFindings(t *testing.T) {
 	w := newWorld(t)
 	w.plex.items["1"][0].Title = "Film.2000.1080p.BluRay.x265-RARBG"
 	w.radarr.rename = []arr.Rename{{ExistingPath: "/m/a.mkv", NewPath: "/m/b.mkv"}}
-	w.radarr.state.block = 3
+	w.radarr.state.health = []arr.Health{{Source: "IndexerCheck", Type: "error", Message: "no indexers"}}
 	w.run(t)
 	w.plex.fail = errors.New("plex down")
 	w.radarr.fail = errors.New("radarr down")
 	w.run(t)
-	for _, kind := range []string{KindReleaseTitle, KindNaming, KindBlocklist} {
+	for _, kind := range []string{KindReleaseTitle, KindNaming, KindHealth} {
 		if fs := w.open(t, kind); len(fs) != 1 {
 			t.Fatalf("%s resolved during an outage: %+v", kind, fs)
 		}
 	}
 	w.radarr.fail, w.plex.fail = nil, nil
 	w.radarr.renErr = errors.New("preview failed")
-	w.radarr.state.block = 0
+	w.radarr.state.health = nil
 	w.run(t)
 	if fs := w.open(t, KindNaming); len(fs) != 1 {
 		t.Fatalf("a failed check resolved its findings: %+v", fs)
 	}
-	if fs := w.open(t, KindBlocklist); len(fs) != 0 {
+	if fs := w.open(t, KindHealth); len(fs) != 0 {
 		t.Fatalf("a real fix should resolve: %+v", fs)
 	}
 }
@@ -1770,5 +1767,80 @@ func TestLocalPathMapping(t *testing.T) {
 		if storage.ValidLocal(bad) == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+}
+
+// emptyShow sets up an untracked Sonarr folder with no video, under a managed path.
+func (w *world) emptyShow(t *testing.T) (storage.Finding, string) {
+	t.Helper()
+	dir := filepath.Join(w.root, "Gone (2001)")
+	if err := os.MkdirAll(filepath.Join(dir, "Season 01"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"tvshow.nfo", "Season 01/poster.jpg"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.sonarr.series = []arr.Series{{ID: 3, Title: "Show", TvdbID: 9, Path: w.root, QualityProfileID: 2}}
+	w.sonarr.state.roots = []arr.RootFolder{{Path: w.root, UnmappedFolders: []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}{{Name: "Gone (2001)", Path: dir}}}}
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(context.Background(), []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindUntracked)
+	if len(fs) != 1 {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0], dir
+}
+
+func TestShowFolderWithNoVideoCanBeAddedOrRemoved(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyShow(t)
+	p, err := w.d.Preview(context.Background(), f)
+	if err != nil || !p.CanFix || len(p.Choices) != 2 || p.Choices[0].Value != "8" || p.Choices[1].Value != removeChoice {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if !strings.Contains(strings.Join(p.Lines, " "), "tvshow.nfo") {
+		t.Fatalf("doesn't say what goes: %v", p.Lines)
+	}
+	if j := w.fix(t, f, removeChoice); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+	if w.sonarr.added != nil {
+		t.Fatal("added as well")
+	}
+}
+
+func TestShowFolderWithNoVideoAddsUnmonitored(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyShow(t)
+	if j := w.fix(t, f, "8"); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if m := w.sonarr.added; m == nil || m["monitored"] != false || m["path"] != dir {
+		t.Fatalf("%+v", m)
+	}
+}
+
+func TestShowFolderRemovalStopsIfAVideoAppears(t *testing.T) {
+	w := newWorld(t)
+	f, dir := w.emptyShow(t)
+	if err := os.WriteFile(filepath.Join(dir, "Season 01", "Gone.S01E01.mkv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, removeChoice); j.State != "failed" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tvshow.nfo")); err != nil {
+		t.Fatal("removed something", err)
 	}
 }

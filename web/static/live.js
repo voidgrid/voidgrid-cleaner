@@ -174,7 +174,7 @@
       loadMore();
     }
     if (e.target.matches("[data-tick-all]")) {
-      const boxes = [...e.target.nextElementSibling.querySelectorAll("input[type=checkbox]")];
+      const boxes = [...e.target.closest("section").querySelectorAll("input[type=checkbox]")];
       const on = boxes.some((b) => !b.checked);
       boxes.forEach((b) => { b.checked = on; });
     }
