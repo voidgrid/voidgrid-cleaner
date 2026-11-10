@@ -1,0 +1,25 @@
+name: test
+
+# Runs the Dockerfile's vet and test gate on every branch push and pull
+# request, so a broken main shows before a tag. Tags are covered by the
+# release build, which runs the same stage.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Same reason as the release workflow: anonymous base image pulls are rate limited.
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: vet and test
+        run: docker build --target builder -f deploy/docker/Dockerfile .

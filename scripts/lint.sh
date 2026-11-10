@@ -16,6 +16,6 @@ run_logged lint docker run --rm \
   -v "$ROOT/.dev/gocache":/cache/go-build \
   -v "$ROOT/.dev/gomodcache":/cache/gomod \
   -v "$ROOT/.dev/lintcache":/cache/lint \
-  golangci/golangci-lint:latest \
+  golangci/golangci-lint:v2.14.0 \
   golangci-lint run
 exit $?

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -83,6 +84,17 @@ func (db *DB) SessionUser(ctx context.Context, token string) (User, error) {
 // DeleteSession ends a session (sign-out). Expired ones are swept too.
 func (db *DB) DeleteSession(ctx context.Context, token string) error {
 	_, err := db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ? OR expires_at <= ?`, hashToken(token), time.Now().Unix())
+	return err
+}
+
+// EndSessionsExcept signs out everyone not in seerrIDs: someone removed from
+// Seerr can't sign in again, and must not keep the session they have.
+func (db *DB) EndSessionsExcept(ctx context.Context, seerrIDs []int64) error {
+	keep, err := json.Marshal(seerrIDs)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `DELETE FROM sessions WHERE seerr_user_id NOT IN (SELECT value FROM json_each(?))`, string(keep))
 	return err
 }
 

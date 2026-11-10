@@ -313,6 +313,17 @@ func (w *Worker) execute(ctx context.Context, d storage.Deletion, dry bool, step
 	if m.ArrID.Valid && !arrID.Valid {
 		return errors.New("was in Radarr/Sonarr at the last sync but isn't now; left alone")
 	}
+	// Two Plex items with one ID share one Radarr or Sonarr entry, and only one
+	// of them is its files: deleting through it could take the other's.
+	if arrID.Valid {
+		n, err := w.DB.SameID(ctx, m)
+		if err != nil {
+			return err
+		}
+		if n > 1 {
+			return fmt.Errorf("%d Plex items match the same Radarr/Sonarr entry; fix the match first; left alone", n)
+		}
+	}
 
 	// An episode leaves the series and its Seerr request alone, so later ones
 	// keep coming; only Sonarr can stop it being grabbed again.

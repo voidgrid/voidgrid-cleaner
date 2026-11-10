@@ -433,12 +433,6 @@ func scanFix(sc interface{ Scan(...any) error }) (FixJob, error) {
 	return j, err
 }
 
-// QueueFix adds a fix; false means that finding already has one waiting.
-func (db *DB) QueueFix(ctx context.Context, findingID int64, choice, who string) (bool, error) {
-	return changed(db.ExecContext(ctx, `INSERT INTO fix_jobs (finding_id, choice, who, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-		findingID, choice, who, time.Now().Unix()))
-}
-
 // ClaimFix moves the oldest queued fix to running.
 func (db *DB) ClaimFix(ctx context.Context) (j FixJob, found bool, err error) {
 	var id int64

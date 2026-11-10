@@ -252,6 +252,17 @@ func (db *DB) DeletionTarget(ctx context.Context, ratingKey string) (m Media, se
 	return m, seerrMedia, true, rows.Err()
 }
 
+// SameID counts the library items of m's type carrying its TMDB ID (movies)
+// or TVDB ID (shows), m included: the ID Radarr or Sonarr is found by.
+func (db *DB) SameID(ctx context.Context, m Media) (n int, err error) {
+	col, id := "tmdb_id", m.TmdbID
+	if m.Type != "movie" {
+		col, id = "tvdb_id", m.TvdbID
+	}
+	err = db.QueryRowContext(ctx, `SELECT count(*) FROM media WHERE type = ? AND `+col+` = ?`, m.Type, id).Scan(&n)
+	return n, err
+}
+
 // visibleDeletions limits a query to what u may see: everything for admins,
 // otherwise what they requested.
 func visibleDeletions(u User, where string, args []any) (string, []any) {

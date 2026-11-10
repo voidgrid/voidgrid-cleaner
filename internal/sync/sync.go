@@ -8,6 +8,7 @@ package sync
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"path"
@@ -132,7 +133,13 @@ func (s *Syncer) users(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Seerr always has its owner: an empty list is a bad reply, not everyone gone.
+	if len(us) == 0 {
+		return 0, errors.New("seerr listed no users")
+	}
+	ids := make([]int64, 0, len(us))
 	for _, su := range us {
+		ids = append(ids, su.ID)
 		u := storage.User{SeerrID: su.ID, Name: su.Name(), IsAdmin: su.IsAdmin()}
 		if su.PlexID != nil {
 			u.PlexID = sql.NullInt64{Int64: *su.PlexID, Valid: true}
@@ -140,6 +147,9 @@ func (s *Syncer) users(ctx context.Context) (int, error) {
 		if err := s.DB.UpsertUser(ctx, u); err != nil {
 			return 0, err
 		}
+	}
+	if err := s.DB.EndSessionsExcept(ctx, ids); err != nil {
+		return 0, err
 	}
 	return len(us), nil
 }
@@ -231,6 +241,11 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 			}
 			out = append(out, m)
 		}
+	}
+	// Replacing with nothing would drop every library's row, and its ignored
+	// flag with it, so they'd come back not ignored.
+	if len(kept) == 0 {
+		return 0, errors.New("plex listed no movie or show libraries")
 	}
 	return len(out), s.DB.ReplaceLibrary(ctx, kept, out)
 }

@@ -45,7 +45,7 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_DISCORD_BOT_TOKEN` | for live deletion | | Discord bot token |
 | `VGC_DISCORD_PUBLIC_KEY` | for live deletion | | The Discord application's public key |
 | `VGC_DISCORD_CHANNEL` | for live deletion | | Channel ID for notifications |
-| `VGC_DISCORD_ADMIN_CHANNEL` | no | | Channel ID for tech alerts: the admin digest and unlinked Add me notices |
+| `VGC_DISCORD_ADMIN_CHANNEL` | no | | Channel ID for tech alerts: the admin digest, unlinked Add me notices and stuck downloads with their buttons |
 | `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
 | `TZ` | no | `UTC` | Time zone for times on screen and the delete window, e.g. `Etc/UTC` |
 | `VGC_LISTEN_ADDR` | no | `0.0.0.0:8790` | Address the app listens on |
@@ -88,7 +88,8 @@ on every disk without any of these mounts.
 ### Sync
 
 Every hour the app copies Seerr users and requests, the Plex movie and show
-libraries (matched to Radarr by TMDB ID and Sonarr by TVDB ID) and new
+libraries (matched to Radarr by TMDB ID and Sonarr by TVDB ID, or by file
+path when Plex's ID is wrong or missing) and new
 Tautulli history into its database; once a day it re-reads all of Tautulli's
 history, so plays deleted there drop out. Admins see each source's last result,
 errors and anything that didn't match on the **sync** page, and can start a
@@ -115,7 +116,7 @@ how long since anyone watched and whether a requester watched; filters combine.
 
 Requester-watched needs to know which Plex account is whose. Seerr knows this
 for Plex users; for everyone else, admins link accounts on the **users** page,
-which lists each Plex account in Tautulli's history that Seerr doesn't link to
+which lists each Plex account in Tautulli's or Plex's history that Seerr doesn't link to
 anyone. One person can have several accounts. Everything played on a linked
 account counts as that person, so leave shared accounts unlinked. Links don't
 affect sign-in.
@@ -148,7 +149,7 @@ an untracked folder (unmonitored, with no search, so nothing downloads) or, for 
 instead, importing a file Radarr won't accept with a quality you
 pick, and stopping Radarr leaving empty folders. On managed paths it can also remove empty folders and delete stray files, and it
 can clear stale Seerr requests. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie TMDb
-removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix only reports what it would delete. Tick them and press **preview** to see exactly what would change; nothing
+removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix and removing a show folder only report what they would delete. Every other fix is real whatever that setting says. Tick them and press **preview** to see exactly what would change; nothing
 happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
 deleted.
 
@@ -215,7 +216,9 @@ to open.
 
 Items Radarr or Sonarr manage are unmonitored and cleared from the queue
 before their files go, so they can't be downloaded again, then removed from
-Seerr. Anything else is deleted through Plex.
+Seerr. Anything else is deleted through Plex. If two Plex items match the same
+movie or show, neither is deleted: only one of them is Radarr's or Sonarr's
+files, so the deletion fails and says so until the match is fixed.
 
 Single episodes can go too: a show's card has an **episodes** link for admins,
 listing every episode Plex has with a **delete** button. Each goes through the
@@ -223,9 +226,11 @@ same notice and delay, named on its own (Show S01E02), and Sonarr stops
 monitoring it so it isn't downloaded again; the show and its other episodes
 stay. Keep on the show stops its episodes going.
 
-Until `VGC_DELETE_LIVE=true`, everything runs as a dry run: the status screen
-shows what would have happened and nothing changes. Items scheduled during a
-dry run stay dry-run after you turn it on.
+Until `VGC_DELETE_LIVE=true`, deletions run as a dry run: the status screen
+shows what would have happened and nothing is deleted. Items scheduled during a
+dry run stay dry-run after you turn it on. Doctor fixes are not part of the dry
+run: except for deleting stray files and removing a show folder, a fix you
+apply really changes Plex, Radarr, Sonarr, Seerr or the disk.
 
 ### Discord bot
 
@@ -237,9 +242,12 @@ Endpoint URL** to `https://<host>/discord/interactions`.
 That path must be reachable from the internet and must not sit behind anything
 that bans on failed requests: Discord sends invalid signatures on purpose to
 test it, and every request is checked against the application's public key.
-The only action it accepts is Keep. A Keep works straight away; people who
-press it appear on the **users** page, where admins can link them to a Seerr
-user to show who it was.
+In the main channel it accepts Keep and Add me, neither of which can start a
+deletion. A Keep works straight away; people who press it appear on the
+**users** page, where admins can link them to a Seerr user to show who it was.
+In the admin channel it also accepts the stuck download buttons (remove,
+blocklist only, blocklist and search), and only from a Discord user linked to a
+Seerr admin.
 
 ### Pages
 
@@ -263,7 +271,7 @@ in the order they'd go, and a warning for paths that aren't mounted.
 
 Anyone with a Seerr account, using Plex or a Seerr local account. Seerr users
 with **Admin**, **Manage Requests** or any **Auto-Approve** permission are admins here; everyone else manages
-only what they requested.
+only what they requested. Someone removed from Seerr is signed out at the next sync.
 
 ### Backups
 

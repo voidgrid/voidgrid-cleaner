@@ -332,3 +332,49 @@ func TestWrongPlexMatchStillFindsArrByPath(t *testing.T) {
 		t.Fatalf("%+v %v", shows, err)
 	}
 }
+
+func TestUserGoneFromSeerrIsSignedOut(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	s.Run(ctx)
+	gone, err := s.DB.CreateSession(ctx, 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stays, err := s.DB.CreateSession(ctx, 7, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.users = f.users[1:] // user 1 removed in Seerr
+	s.Run(ctx)
+	if _, err := s.DB.SessionUser(ctx, gone); !errors.Is(err, storage.ErrNoSession) {
+		t.Fatalf("removed user's session: %v", err)
+	}
+	if _, err := s.DB.SessionUser(ctx, stays); err != nil {
+		t.Fatalf("other user's session: %v", err)
+	}
+	// A reply with nobody in it is a bad reply: nobody is signed out.
+	f.users = nil
+	s.Run(ctx)
+	if _, err := s.DB.SessionUser(ctx, stays); err != nil {
+		t.Fatalf("session after an empty user list: %v", err)
+	}
+}
+
+func TestNoLibrariesFromPlexKeepsIgnoredFlag(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	s.Run(ctx)
+	if _, err := s.DB.SetSectionIgnored(ctx, "1", true); err != nil {
+		t.Fatal(err)
+	}
+	secs := f.secs
+	f.secs = nil
+	s.Run(ctx)
+	f.secs = secs
+	s.Run(ctx)
+	got, _ := s.DB.Sections(ctx)
+	if len(got) != 2 || got[1].Key != "1" || !got[1].Ignored {
+		t.Fatalf("sections %+v, want library 1 still ignored", got)
+	}
+}

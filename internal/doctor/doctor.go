@@ -2,8 +2,9 @@
 //
 // A run reads every source once, then pure checks turn that into findings.
 // A source that fails skips only the checks that need it, and their old
-// findings stay, so an outage never reads as "all clear". Nothing here changes
-// anything outside the database.
+// findings stay, so an outage never reads as "all clear". The checks only
+// read. The fixes (fix*.go, downloads.go) change Plex, Radarr, Sonarr, Seerr
+// and the disk, and only once an admin has approved each one.
 package doctor
 
 import (

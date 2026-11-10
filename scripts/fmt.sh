@@ -15,5 +15,5 @@ run_logged fmt docker run --rm \
   -v "$ROOT/.dev/gocache":/cache/go-build \
   -v "$ROOT/.dev/gomodcache":/cache/gomod \
   golang:1.26-alpine \
-  go run mvdan.cc/gofumpt@latest -l -w ./cmd ./internal ./migrations ./web
+  go run mvdan.cc/gofumpt@v0.12.0 -l -w ./cmd ./internal ./migrations ./web
 exit $?

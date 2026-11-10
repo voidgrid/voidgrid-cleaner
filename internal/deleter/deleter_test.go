@@ -756,3 +756,23 @@ func TestMainDigestIsOnlyWhatsAboutToGo(t *testing.T) {
 		t.Fatal("an empty day should say nothing")
 	}
 }
+
+// A second Plex item with Radarr's ID isn't Radarr's files: deleting through
+// Radarr would take the other item's, kept or not.
+func TestTwoPlexItemsOneArrEntryIsLeftAlone(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	secs := []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}, {Key: "4", Title: "Kids", Type: "movie"}}
+	if err := w.DB.ReplaceLibrary(ctx, secs, []storage.Media{
+		{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "Film", TmdbID: nullInt(100), ArrID: nullInt(7)},
+		{RatingKey: "40", SectionKey: "4", Type: "movie", Title: "Film", TmdbID: nullInt(100), ArrID: nullInt(7)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, w, "40", false)
+	runDue(w, now)
+	wantCalls(t, f, "notify")
+	if d := recent(t, w); d.State != storage.DeletionFailed || !strings.Contains(d.Detail, "2 Plex items") {
+		t.Fatalf("%+v", d)
+	}
+}

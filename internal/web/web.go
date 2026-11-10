@@ -342,7 +342,6 @@ func (s *Server) Router() http.Handler {
 			r.Post("/settings", s.saveSettings)
 			r.Post("/users/plex/{id}", s.setPlexAccount)
 			r.Post("/users/discord/{id}", s.setDiscordUser)
-			// shortcut: admins only until the request flow lets users ask for changes.
 			r.Get("/library/item/{ratingKey}/episodes", s.episodes)
 			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/delete", s.markEpisode)
 			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/cancel", s.cancelEpisode)

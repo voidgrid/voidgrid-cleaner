@@ -628,8 +628,8 @@ func (w *world) wrongMatch(t *testing.T) storage.Finding {
 func (w *world) fix(t *testing.T, f storage.Finding, choice string) storage.FixJob {
 	t.Helper()
 	ctx := context.Background()
-	if ok, err := w.d.DB.QueueFix(ctx, f.ID, choice, "admin"); err != nil || !ok {
-		t.Fatalf("queue: %v %v", ok, err)
+	if err := w.d.DB.QueueFixes(ctx, "admin", []storage.QueuedFix{{FindingID: f.ID, Title: f.Title, Choice: choice}}); err != nil {
+		t.Fatalf("queue: %v", err)
 	}
 	if n := w.d.RunFixes(ctx); n != 1 {
 		t.Fatalf("ran %d", n)
@@ -678,7 +678,8 @@ func TestFixIsVerified(t *testing.T) {
 		t.Fatal(got)
 	}
 	es, _ := w.d.DB.AuditLog(context.Background(), "doctor fix", 10, 0)
-	if len(es) != 1 || es[0].Who != "admin" {
+	// Newest first: the outcome, then the approval that queued it.
+	if len(es) != 2 || es[0].Who != "admin" || es[0].Action != "doctor fix done" || es[1].Action != "doctor fix approved" {
 		t.Fatalf("%+v", es)
 	}
 }
@@ -758,7 +759,7 @@ func TestInterruptedFixDoesntResume(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
 	f := w.wrongMatch(t)
-	if _, err := w.d.DB.QueueFix(ctx, f.ID, "x", "admin"); err != nil {
+	if err := w.d.DB.QueueFixes(ctx, "admin", []storage.QueuedFix{{FindingID: f.ID, Title: f.Title, Choice: "x"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, found, err := w.d.DB.ClaimFix(ctx); err != nil || !found {
