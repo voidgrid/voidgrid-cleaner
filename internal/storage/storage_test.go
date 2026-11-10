@@ -637,3 +637,59 @@ func TestParseDigestTime(t *testing.T) {
 		t.Fatal("accepted 25:00")
 	}
 }
+
+func TestMakeEphemeralOnlyFromNothing(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	secs := []Section{{Key: "2", Title: "TV", Type: "show"}}
+	ms := []Media{{RatingKey: "20", SectionKey: "2", Type: "show", Title: "A"}, {RatingKey: "21", SectionKey: "2", Type: "show", Title: "B"}, {RatingKey: "22", SectionKey: "2", Type: "show", Title: "C"}}
+	if err := db.ReplaceLibrary(ctx, secs, ms); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetItemStatus(ctx, "21", StatusKeep, 1); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.ScheduleDeletion(ctx, "22", 1, true, KindManual); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	for key, want := range map[string]bool{"20": true, "21": false, "22": false} {
+		if got, err := db.MakeEphemeral(ctx, key, 2); err != nil || got != want {
+			t.Fatalf("%s: %v %v, want %v", key, got, err, want)
+		}
+	}
+	if st, _, _ := db.ItemState(ctx, "21"); st != StatusKeep {
+		t.Fatalf("keep was overwritten: %s", st)
+	}
+	if again, err := db.MakeEphemeral(ctx, "20", 2); err != nil || again {
+		t.Fatalf("second time: %v %v", again, err)
+	}
+}
+
+func TestDismissedEpisodeListReopensOnlyWhenItGains(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	save := func(eps string) string {
+		t.Helper()
+		if err := db.SaveFindings(ctx, "missing", []Finding{{Subject: "episodes:3", Title: "Show", Severity: "note", Data: `{"episodes":` + eps + `}`}}); err != nil {
+			t.Fatal(err)
+		}
+		var state string
+		if err := db.QueryRow(`SELECT state FROM findings WHERE subject = 'episodes:3'`).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	save("[1,2]")
+	if _, err := db.Exec(`UPDATE findings SET state = 'dismissed'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := save("[1,2]"); got != "dismissed" {
+		t.Fatalf("same episodes: %s", got)
+	}
+	if got := save("[2]"); got != "dismissed" {
+		t.Fatalf("one fewer: %s", got)
+	}
+	if got := save("[2,5]"); got != "open" {
+		t.Fatalf("a new episode: %s", got)
+	}
+}

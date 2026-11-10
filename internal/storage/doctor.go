@@ -23,10 +23,16 @@ type Finding struct {
 	FirstSeen, LastSeen int64
 	Data                string // JSON for the fix
 	Alerted             bool   // posted to Discord
+	// ReopenOnChange is set by a check, not stored: a dismissed finding opens
+	// again when its detail differs from what was dismissed.
+	ReopenOnChange bool
 }
 
 // SaveFindings records one kind's complete result: new findings open, gone
-// ones resolve, and dismissed ones stay dismissed.
+// ones resolve, and dismissed ones stay dismissed. The one exception is a
+// dismissed finding listing episodes: an episode that wasn't in it when it was
+// dismissed reopens it, because nobody decided anything about that one. A
+// check can also ask for any change of detail to reopen (ReopenOnChange).
 func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error {
 	now := time.Now().Unix()
 	subjects := make([]string, 0, len(fs))
@@ -52,8 +58,12 @@ func (db *DB) SaveFindings(ctx context.Context, kind string, fs []Finding) error
 				ON CONFLICT (kind, subject) DO UPDATE SET title = excluded.title, detail = excluded.detail, severity = excluded.severity, data = excluded.data,
 					last_seen = excluded.last_seen, alerted = CASE state WHEN 'resolved' THEN 0 ELSE alerted END,
 					first_seen = CASE state WHEN 'resolved' THEN excluded.first_seen ELSE first_seen END,
-					state = CASE state WHEN 'resolved' THEN 'open' ELSE state END`,
-				kind, f.Subject, f.Title, f.Detail, f.Severity, now, now, data); err != nil {
+					state = CASE WHEN state = 'resolved' THEN 'open'
+						WHEN state = 'dismissed' AND EXISTS (SELECT 1 FROM json_each(excluded.data, '$.episodes') n
+							WHERE n.value NOT IN (SELECT value FROM json_each(findings.data, '$.episodes'))) THEN 'open'
+						WHEN state = 'dismissed' AND ? AND detail <> excluded.detail THEN 'open'
+						ELSE state END`,
+				kind, f.Subject, f.Title, f.Detail, f.Severity, now, now, data, f.ReopenOnChange); err != nil {
 				return err
 			}
 		}

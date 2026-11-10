@@ -88,8 +88,8 @@ on every disk without any of these mounts.
 ### Sync
 
 Every hour the app copies Seerr users and requests, the Plex movie and show
-libraries (matched to Radarr by TMDB ID and Sonarr by TVDB ID, or by file
-path when Plex's ID is wrong or missing) and new
+libraries (movies matched to Radarr by the folder their file is in, else by
+TMDB ID; shows to Sonarr by TVDB ID, else by folder) and new
 Tautulli history into its database; once a day it re-reads all of Tautulli's
 history, so plays deleted there drop out. Admins see each source's last result,
 errors and anything that didn't match on the **sync** page, and can start a
@@ -140,7 +140,9 @@ picked, because nothing says which disk they're on.
 The **doctor** page lists where Plex, Radarr, Sonarr, Seerr and the disk disagree: wrong or questionable Plex matches, release
 names as titles, untracked folders, stale requests, files off the naming scheme, and more. It runs after each sync. A service
 that can't be reached only skips the checks that need it, and their last results stay. Dismiss anything you've decided is
-fine, and it stays dismissed. Each section has its own **preview ticked fixes** and **dismiss ticked** buttons.
+fine, and it stays dismissed, with two exceptions: a show's missing episodes come back when another episode goes missing, and a Radarr or
+Sonarr warning comes back when what it says changes. If a managed path isn't verified, such as a missing mount, what the disk
+checks found under it stays as it was until it's back; other paths are checked as usual. Each section has its own **preview ticked fixes** and **dismiss ticked** buttons.
 
 Entries with a checkbox can be fixed from here: wrong and questionable Plex matches, release names as titles, and a library's
 **Prefer local metadata** setting, which is how those titles happen. If Plex's match is right and only the name is wrong, the

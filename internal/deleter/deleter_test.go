@@ -718,10 +718,14 @@ func TestAdminDigestOnlyWithAChannel(t *testing.T) {
 	}
 	w2, f2, now2 := setup(t)
 	w2.AdminChannel = true
+	// Read the clock before saving: the digest counts findings first seen in
+	// its last day, to the second, so a second ticking over in between would
+	// put this one just outside it.
+	saved := time.Now()
 	if err := w2.DB.SaveFindings(ctx, "naming", []storage.Finding{{Subject: "x", Title: "X", Severity: "note"}}); err != nil {
 		t.Fatal(err)
 	}
-	*now2 = time.Now().Add(24 * time.Hour)
+	*now2 = saved.Add(24 * time.Hour)
 	if err := w2.DB.SetDigestTime(ctx, "00:00"); err != nil {
 		t.Fatal(err)
 	}
@@ -775,4 +779,24 @@ func TestTwoPlexItemsOneArrEntryIsLeftAlone(t *testing.T) {
 	if d := recent(t, w); d.State != storage.DeletionFailed || !strings.Contains(d.Detail, "2 Plex items") {
 		t.Fatalf("%+v", d)
 	}
+}
+
+// The post went out but the row couldn't be marked: it isn't posted again
+// every tick.
+func TestNoticeNotRepeatedEveryTickWhenMarkingFails(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	if _, err := w.DB.Exec(`CREATE TRIGGER boom BEFORE UPDATE OF state ON deletions WHEN NEW.state = 'notified'
+		BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, w, "10", false)
+	for range 3 {
+		w.Tick(ctx)
+		*now = now.Add(time.Minute)
+	}
+	wantCalls(t, f, "notify")
+	*now = now.Add(notifyRetry)
+	w.Tick(ctx)
+	wantCalls(t, f, "notify", "notify")
 }

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
@@ -354,7 +356,9 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 		})
 	}
 	for _, m := range s.movies {
-		if !s.inManaged(m.Path) {
+		// With no file in Radarr, a video here may be the movie itself, waiting
+		// to be imported: that's a file not accepted, never a stray to delete.
+		if !s.inManaged(m.Path) || m.MovieFile == nil {
 			continue
 		}
 		entries, err := os.ReadDir(s.local(m.Path))
@@ -362,7 +366,7 @@ func (d *Doctor) strayFiles(ctx context.Context, s *snapshot) ([]storage.Finding
 			continue
 		}
 		for _, e := range entries {
-			if e.IsDir() || !isVideoFile(e.Name()) || (m.MovieFile != nil && e.Name() == m.MovieFile.RelativePath) {
+			if e.IsDir() || !isVideoFile(e.Name()) || e.Name() == m.MovieFile.RelativePath {
 				continue
 			}
 			p := path.Join(m.Path, e.Name())
@@ -383,6 +387,10 @@ func (s *snapshot) health() []storage.Finding {
 		movies[fmt.Sprint(m.TmdbID)] = m
 	}
 	var out []storage.Finding
+	// One finding per check, holding everything it says now. A dismissed one
+	// opens again when that changes: a second indexer failing is news.
+	byCheck := map[string]int{}
+	said := map[string][]string{}
 	for name, st := range map[string]arrState{appRadarr: s.radarr, appSonarr: s.sonarr} {
 		for _, h := range st.health {
 			severity := note
@@ -405,8 +413,21 @@ func (s *snapshot) health() []storage.Finding {
 			if h.WikiURL != "" {
 				detail += " See " + h.WikiURL
 			}
-			out = append(out, storage.Finding{Subject: name + ":" + h.Source + ":" + h.Message, Title: name + ": " + h.Source, Severity: severity, Detail: detail})
+			subject := name + ":" + h.Source
+			said[subject] = append(said[subject], detail)
+			if i, seen := byCheck[subject]; seen {
+				if severity == problem {
+					out[i].Severity = problem
+				}
+				continue
+			}
+			byCheck[subject] = len(out)
+			out = append(out, storage.Finding{Subject: subject, Title: name + ": " + h.Source, Severity: severity, ReopenOnChange: true})
 		}
+	}
+	for subject, i := range byCheck {
+		slices.Sort(said[subject]) // the order they arrive in mustn't count as a change
+		out[i].Detail = strings.Join(said[subject], " ")
 	}
 	return out
 }
@@ -550,10 +571,15 @@ func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Find
 		}
 		detail += ", and nothing has it."
 		title, err := d.Seerr.Title(ctx, r.Type, r.TmdbID)
+		// Seerr answers 500 for an ID TMDb dropped. Anything that isn't an answer
+		// means Seerr couldn't be asked, so the check saves nothing this run.
+		if se := (*httpjson.StatusError)(nil); err != nil && !errors.As(err, &se) {
+			return nil, err
+		}
 		if err != nil || title == "" {
-			// TMDb dropped it, and Seerr stores only the ID, so there's no name left to show.
+			// Seerr stores only the ID, so there's no name left to show.
 			title = fmt.Sprintf("unknown %s (TMDB %d)", r.Type, r.TmdbID)
-			detail += " TMDb no longer has this ID, so its name is gone."
+			detail += " Seerr can't name it, so TMDb probably no longer has this ID."
 		}
 		out = append(out, storage.Finding{Subject: fmt.Sprint(r.MediaID), Title: title, Severity: note, Detail: detail, Data: encode(fixData{MediaID: r.MediaID})})
 	}

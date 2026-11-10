@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +52,7 @@ func (f *fakeArr) Queue(context.Context) ([]arr.QueueRecord, error) { return f.q
 func (f *fakeArr) RemoveQueue(_ context.Context, ids []int64, blocklist, skip bool) error {
 	f.removed = append(f.removed, fmt.Sprintf("%v blocklist=%v skip=%v", ids, blocklist, skip))
 	if f.clearOnRemove {
-		f.queue = nil
+		f.queue = slices.DeleteFunc(f.queue, func(q arr.QueueRecord) bool { return slices.Contains(ids, q.ID) })
 	}
 	return nil
 }
@@ -259,14 +261,18 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 }
 
 type fakeSeerr struct {
-	deleted []int64
-	err     error
-	noTitle bool
+	deleted  []int64
+	err      error
+	noTitle  bool
+	titleErr error
 }
 
 func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
-	if f.noTitle {
-		return "", errors.New("404")
+	if f.titleErr != nil {
+		return "", f.titleErr
+	}
+	if f.noTitle { // what Seerr answers for an ID TMDb dropped
+		return "", &httpjson.StatusError{Service: "seerr", Code: http.StatusInternalServerError}
 	}
 	return "Gone Film", nil
 }
@@ -1643,6 +1649,11 @@ func TestNamingGroups(t *testing.T) {
 			t.Fatalf("%v: got %q, want %q", names, got, want)
 		}
 	}
+	// A quality word inside the title isn't the label.
+	f := storage.Finding{Data: encode(fixData{App: appSonarr, OldName: "S01E01 - The Unknown Soldier WEBDL-1080p.mkv", NewName: "S01E01 - The Unknown Known WEBDL-1080p.mkv"})}
+	if got := NamingGroup(f); got != "episode title changed" {
+		t.Fatalf("got %q", got)
+	}
 }
 
 func TestSpaceCardSkipsTheAppsOwnRoot(t *testing.T) {
@@ -1843,5 +1854,152 @@ func TestShowFolderRemovalStopsIfAVideoAppears(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "tvshow.nfo")); err != nil {
 		t.Fatal("removed something", err)
+	}
+}
+
+// A download with no ID is gone once its own queue entry is, whatever else
+// in the queue has no ID either.
+func TestStuckDownloadWithNoIDIsMatchedByQueueEntry(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.queue = []arr.QueueRecord{
+		{ID: 5, Title: "Stuck.Film", TrackedDownloadStatus: "warning", TrackedDownloadState: "importBlocked"},
+		{ID: 6, Title: "Other.Film", TrackedDownloadStatus: "ok", TrackedDownloadState: "downloading"},
+	}
+	if err := w.d.CheckDownloads(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	w.radarr.clearOnRemove = true
+	if j := w.fix(t, w.open(t, KindStuck)[0], doRemoveDownload); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+}
+
+// Radarr has the movie and not its file: the video in its folder is the movie
+// waiting for an import, so it must never be offered for deletion as a stray.
+func TestUnimportedMovieFileIsNotAStray(t *testing.T) {
+	w := newWorld(t)
+	w.radarr.movies[0].HasFile, w.radarr.movies[0].MovieFile = false, nil
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(context.Background(), []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStrayFile); len(fs) != 0 {
+		t.Fatalf("the movie's own file is called a stray: %+v", fs)
+	}
+	if fs := w.open(t, KindNotAccepted); len(fs) != 1 {
+		t.Fatalf("not reported as a file Radarr won't accept: %+v", fs)
+	}
+}
+
+// A health warning is one finding per check. Dismissed, it stays dismissed
+// while it says the same thing, in any order, and opens again when it doesn't.
+func TestDismissedHealthWarningReopensWhenItChanges(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	a := arr.Health{Source: "IndexerStatusCheck", Type: "warning", Message: "Indexers unavailable due to failures: A"}
+	b := arr.Health{Source: "IndexerStatusCheck", Type: "error", Message: "All indexers are unavailable"}
+	w.sonarr.state.health = []arr.Health{a, b}
+	w.run(t)
+	fs := w.open(t, KindHealth)
+	if len(fs) != 1 || fs[0].Severity != problem || !strings.Contains(fs[0].Detail, "failures: A") || !strings.Contains(fs[0].Detail, "All indexers") {
+		t.Fatalf("%+v", fs)
+	}
+	if _, err := w.d.DB.SetFindingState(ctx, fs[0].ID, "dismissed"); err != nil {
+		t.Fatal(err)
+	}
+	w.sonarr.state.health = []arr.Health{b, a}
+	w.run(t)
+	if again := w.open(t, KindHealth); len(again) != 0 {
+		t.Fatalf("the same warnings in another order reopened it: %+v", again)
+	}
+	a.Message = "Indexers unavailable due to failures: A, B"
+	w.sonarr.state.health = []arr.Health{a, b}
+	w.run(t)
+	if again := w.open(t, KindHealth); len(again) != 1 || again[0].ID != fs[0].ID || !strings.Contains(again[0].Detail, "A, B") {
+		t.Fatalf("a changed warning stayed dismissed: %+v", again)
+	}
+}
+
+// Seerr not answering isn't Seerr saying a title is gone: nothing is saved.
+func TestStaleRequestKeepsItsNameWhenSeerrCantBeReached(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	if err := w.d.DB.ReplaceRequests(ctx, []storage.Request{{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "movie", TmdbID: 42, Status: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	w.seerr.titleErr = errors.New("connection refused")
+	w.run(t)
+	if fs := w.open(t, KindStaleRequest); len(fs) != 1 || fs[0].Title != "Gone Film" {
+		t.Fatalf("%+v", fs)
+	}
+}
+
+// The mount going away must not read as "the stray file is gone".
+func TestMissingMountKeepsDiskFindings(t *testing.T) {
+	w := newWorld(t)
+	w.strayFile(t)
+	if err := os.Rename(w.root, w.root+"-unmounted"); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStrayFile); len(fs) != 1 {
+		t.Fatalf("resolved by a missing mount: %+v", fs)
+	}
+	if err := os.Rename(w.root+"-unmounted", w.root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(w.root, "Film (2000)", "extra.m2ts")); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStrayFile); len(fs) != 0 {
+		t.Fatalf("still open once the mount is back and the file is gone: %+v", fs)
+	}
+}
+
+// Only what's under the missing mount is held; another managed path is still
+// checked, so its findings resolve as usual.
+func TestMissingMountHoldsOnlyItsOwnFindings(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	w.strayFile(t)
+	root2 := filepath.Join(filepath.Dir(w.root), "more")
+	other := filepath.Join(root2, "Other (2001)")
+	if err := os.MkdirAll(other, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Other.mkv", "sample.mkv"} {
+		if err := os.WriteFile(filepath.Join(other, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 2, Title: "Other", Year: 2001, TmdbID: 200, Path: other, HasFile: true, MovieFile: &struct {
+		RelativePath string `json:"relativePath"`
+	}{"Other.mkv"}})
+	w.radarr.state.roots = append(w.radarr.state.roots, arr.RootFolder{Path: root2})
+	w.plex.secs[0].Location = append(w.plex.secs[0].Location, struct {
+		Path string `json:"path"`
+	}{root2})
+	w.plex.items["1"] = append(w.plex.items["1"], item(t, `{"ratingKey":"11","title":"Other","year":2001,"guid":"plex://movie/2","Guid":[{"id":"tmdb://200"}],"Media":[{"Part":[{"file":"`+filepath.Join(other, "Other.mkv")+`"}]}]}`))
+	w.run(t)
+	if err := w.d.DB.SetManagedPaths(ctx, []string{w.root, root2}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStrayFile); len(fs) != 2 {
+		t.Fatalf("want a stray under each path: %+v", fs)
+	}
+	if err := os.Rename(w.root, w.root+"-unmounted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(other, "sample.mkv")); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindStrayFile)
+	if len(fs) != 1 || !strings.HasPrefix(fs[0].Subject, w.root+"/") {
+		t.Fatalf("want only the one under the missing mount: %+v", fs)
 	}
 }

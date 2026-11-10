@@ -1037,21 +1037,18 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == storage.StatusEphemeral {
-		status, deleting, err := s.DB.ItemState(r.Context(), key)
-		if err != nil {
-			log.Printf("web: item state: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
 		// Only from normal: it mustn't override an admin's keep or space-based,
 		// or stop a deletion that's on its way without an admin seeing it.
-		if typ != "show" || status != storage.StatusNormal || deleting {
-			http.Error(w, "only a show with no status and no deletion on its way can be made ephemeral; ask to keep it instead", http.StatusConflict)
-			return
+		made := false
+		if typ == "show" {
+			if made, err = s.DB.MakeEphemeral(r.Context(), key, u.SeerrID); err != nil {
+				log.Printf("web: make ephemeral: %v", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 		}
-		if err := s.DB.SetItemStatus(r.Context(), key, storage.StatusEphemeral, u.SeerrID); err != nil {
-			log.Printf("web: set status: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+		if !made {
+			http.Error(w, "only a show with no status and no deletion on its way can be made ephemeral; ask to keep it instead", http.StatusConflict)
 			return
 		}
 		s.DB.Audit(r.Context(), u.Name, "set status", key, storage.StatusEphemeral)

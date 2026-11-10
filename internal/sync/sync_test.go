@@ -378,3 +378,21 @@ func TestNoLibrariesFromPlexKeepsIgnoredFlag(t *testing.T) {
 		t.Fatalf("sections %+v, want library 1 still ignored", got)
 	}
 }
+
+// The file is in one Radarr movie's folder and Plex matched it as another
+// movie Radarr has: the folder wins, or a deletion would act on the wrong one.
+func TestFolderBeatsPlexIDWhenBothMatchRadarr(t *testing.T) {
+	s, f := setup(t)
+	var it plex.Item
+	if err := json.Unmarshal([]byte(`{"ratingKey":"10","type":"movie","title":"Y","Guid":[{"id":"tmdb://200"}],"Media":[{"Part":[{"file":"/m/X (2000)/X.mkv"}]}]}`), &it); err != nil {
+		t.Fatal(err)
+	}
+	f.secs = []plex.Section{{Key: "1", Type: "movie", Title: "Movies"}}
+	f.items = map[string][]plex.Item{"1": {it}}
+	f.movies = []arr.Movie{{ID: 7, TmdbID: 100, Path: "/m/X (2000)"}, {ID: 8, TmdbID: 200, Path: "/m/Y (2001)"}}
+	s.Run(context.Background())
+	var id, tmdb int64
+	if err := s.DB.QueryRow(`SELECT arr_id, tmdb_id FROM media WHERE rating_key = '10'`).Scan(&id, &tmdb); err != nil || id != 7 || tmdb != 100 {
+		t.Fatalf("linked to Radarr movie %d (tmdb %d) %v, want 7 (100)", id, tmdb, err)
+	}
+}

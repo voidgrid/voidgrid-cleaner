@@ -13,7 +13,10 @@ import (
 var NamingGroups = []string{"capital letters only", "punctuation only", "part number only", "quality label only", "episode title changed", "movie title or year changed"}
 
 var (
-	qualitySuffix = regexp.MustCompile(`^(.*?)\s*-?\s*((?:HDTV|WEBDL|WEBRip|Bluray|Remux|DVD|SDTV|Raw-HD|Unknown)[-\w ]*)$`)
+	// The label is a quality word, its resolution and known extras, at the very
+	// end. Anything looser takes a title's own words ("The Unknown Soldier") for
+	// part of the label, and a title change for a harmless one.
+	qualitySuffix = regexp.MustCompile(`^(.*?)\s*-?\s*\b((?:HDTV|WEBDL|WEBRip|Bluray|Remux|DVD|SDTV|Raw-HD|Unknown)(?:-\w+)?(?: (?:Remux|Proper|Repack|REAL|v\d+))*)$`)
 	partNumber    = regexp.MustCompile(`\s*\(\d+\)$`)
 	notAlnum      = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 )

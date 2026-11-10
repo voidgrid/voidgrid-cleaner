@@ -298,7 +298,7 @@ func (d *Doctor) applyStuck(ctx context.Context, data fixData, choice string) (s
 		if err != nil {
 			return "", err
 		}
-		if !inQueue(q, data.DownloadID) {
+		if !inQueue(q, data) {
 			break
 		}
 		if try == verifyTries {
@@ -316,9 +316,12 @@ func (d *Doctor) applyStuck(ctx context.Context, data fixData, choice string) (s
 	return "done", nil
 }
 
-func inQueue(q []arr.QueueRecord, downloadID string) bool {
+// inQueue reports whether a finding's download is still queued. One with no
+// download ID is matched by its queue entries: an empty ID would match every
+// other download that has none.
+func inQueue(q []arr.QueueRecord, data fixData) bool {
 	for _, r := range q {
-		if r.DownloadID == downloadID {
+		if (data.DownloadID != "" && r.DownloadID == data.DownloadID) || (data.DownloadID == "" && slices.Contains(data.QueueIDs, r.ID)) {
 			return true
 		}
 	}

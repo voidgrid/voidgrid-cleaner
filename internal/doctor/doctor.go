@@ -294,6 +294,38 @@ func (d *Doctor) Run(ctx context.Context) bool {
 		tryFind(ok, kind, func() ([]storage.Finding, error) { return find(), nil })
 	}
 	arrs, all := s.radarrOK && s.sonarrOK, s.radarrOK && s.sonarrOK && s.plexOK
+	// A managed path that isn't verified right now (a missing mount) hides what
+	// the disk checks found under it, which would resolve it all. What they had
+	// open there stays as it was until the path is back; every other path is
+	// checked as usual.
+	var unverified []string
+	for _, p := range s.paths {
+		if p.Managed && !p.Verified {
+			unverified = append(unverified, p.Path)
+		}
+	}
+	var open []storage.Finding
+	disk := true
+	if len(unverified) > 0 {
+		var err error
+		if open, err = d.DB.Findings(ctx, "open"); err != nil {
+			log.Printf("doctor: open findings: %v", err)
+			disk = false // can't carry them over, so save nothing rather than resolve them
+		}
+	}
+	hidden := func(subject string) bool {
+		return slices.ContainsFunc(unverified, func(root string) bool { return strings.HasPrefix(subject, root+"/") })
+	}
+	// These three kinds are keyed by the path they're about.
+	frozen := func(kind string, fs []storage.Finding) []storage.Finding {
+		fs = slices.DeleteFunc(fs, func(f storage.Finding) bool { return hidden(f.Subject) })
+		for _, f := range open {
+			if f.Kind == kind && hidden(f.Subject) {
+				fs = append(fs, f)
+			}
+		}
+		return fs
+	}
 	save(all, KindPathNotMounted, s.pathsNotMounted)
 	save(all, KindPathNotVerified, s.pathsNotVerified)
 	save(all, KindPathMismatch, s.pathMismatches)
@@ -301,10 +333,13 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	save(all, KindQuestionable, s.questionableMatches)
 	save(s.plexOK, KindReleaseTitle, s.releaseTitles)
 	save(all, KindNotAccepted, s.notAccepted)
-	save(arrs, KindUntracked, s.untracked)
+	save(arrs && disk, KindUntracked, func() []storage.Finding { return frozen(KindUntracked, s.untracked()) })
 	save(all, KindNotManaged, s.notManaged)
-	save(arrs, KindEmptyFolder, s.emptyFolders)
-	tryFind(all, KindStrayFile, func() ([]storage.Finding, error) { return d.strayFiles(ctx, &s) })
+	save(arrs && disk, KindEmptyFolder, func() []storage.Finding { return frozen(KindEmptyFolder, s.emptyFolders()) })
+	tryFind(all && disk, KindStrayFile, func() ([]storage.Finding, error) {
+		fs, err := d.strayFiles(ctx, &s)
+		return frozen(KindStrayFile, fs), err
+	})
 	save(arrs, KindHealth, s.health)
 	save(arrs, KindMissing, s.missing)
 	save(all, KindSettings, s.settings)

@@ -208,17 +208,20 @@ func (s *Syncer) library(ctx context.Context) (int, error) {
 				TmdbID: idOf(it, "tmdb"), TvdbID: idOf(it, "tvdb"),
 			}
 			if sec.Type == "movie" {
-				rm, ok := byTmdb[m.TmdbID.Int64]
-				if !ok || !m.TmdbID.Valid {
-					// Plex's ID can be wrong, but the file can't. Taking Radarr's
-					// ID also keeps the deletion's own lookup on Radarr's path:
-					// an item Radarr manages must never be deleted through Plex.
-					for _, f := range it.Files() {
-						if byFile, found := moviePaths[path.Dir(f)]; found {
-							rm, ok = byFile, true
-							m.TmdbID = sql.NullInt64{Int64: rm.TmdbID, Valid: true}
-						}
+				// Plex's ID can be wrong, but the file can't: the folder decides
+				// first, as in the doctor, and the ID only when no folder matches.
+				// Taking Radarr's ID also keeps the deletion's own lookup on the
+				// right Radarr movie, and off the Plex-only path.
+				var rm arr.Movie
+				ok := false
+				for _, f := range it.Files() {
+					if byFile, found := moviePaths[path.Dir(f)]; found {
+						rm, ok = byFile, true
+						m.TmdbID = sql.NullInt64{Int64: rm.TmdbID, Valid: true}
 					}
+				}
+				if !ok && m.TmdbID.Valid {
+					rm, ok = byTmdb[m.TmdbID.Int64]
 				}
 				if ok {
 					m.ArrID, m.SizeBytes = sql.NullInt64{Int64: rm.ID, Valid: true}, rm.SizeOnDisk

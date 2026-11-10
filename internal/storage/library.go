@@ -517,6 +517,19 @@ func (db *DB) SetItemStatus(ctx context.Context, ratingKey, status string, by in
 	})
 }
 
+// MakeEphemeral sets an item ephemeral only if it has no status and no
+// deletion on its way, checked and written in one statement so a status an
+// admin sets at the same moment is never overwritten. False if it didn't apply.
+func (db *DB) MakeEphemeral(ctx context.Context, ratingKey string, by int64) (bool, error) {
+	return changed(db.ExecContext(ctx, `INSERT INTO item_status (rating_key, status, set_by, set_at)
+		SELECT ?, ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM item_status WHERE rating_key = ?)
+			AND NOT EXISTS (SELECT 1 FROM deletions WHERE (rating_key = ? OR parent_key = ?) AND state IN (?, ?, ?))
+		ON CONFLICT (rating_key) DO NOTHING`,
+		ratingKey, StatusEphemeral, by, time.Now().Unix(), ratingKey, ratingKey, ratingKey,
+		DeletionScheduled, DeletionNotified, DeletionExecuting))
+}
+
 // Thumb returns the Plex thumb path of a library item, "" if unknown.
 func (db *DB) Thumb(ctx context.Context, ratingKey string) (string, error) {
 	var t string

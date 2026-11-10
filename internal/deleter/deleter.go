@@ -211,6 +211,9 @@ func (w *Worker) notify(ctx context.Context, window storage.DeleteWindow) error 
 		}
 		for _, b := range batch {
 			if err := w.DB.MarkNotified(ctx, b.ID, after); err != nil {
+				// Discord has it but the row doesn't say so: the next try posts
+				// it again, so that mustn't be every tick either.
+				w.notifyAfter = w.Now().Add(notifyRetry)
 				return err
 			}
 		}
