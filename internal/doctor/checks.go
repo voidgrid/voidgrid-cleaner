@@ -432,30 +432,31 @@ func (s *snapshot) health() []storage.Finding {
 	return out
 }
 
-// released says a movie's status is past announced and in cinemas. An unknown
-// status counts as released, so nothing is hidden on a guess.
-func released(status string) bool {
-	return status == "" || status == "released"
-}
+// settle is how long after something comes out it may go without a file before
+// it counts as missing: indexers and downloads take a while.
+const settle = 3 * 24 * time.Hour
 
-// seriesAired says a series has started. One not yet aired has no files to
-// get, so it isn't missing any.
-func seriesAired(sr arr.Series) bool {
-	if sr.Status == "upcoming" {
+// movieOut says a movie has come out and had time to arrive. Radarr's status
+// must say released, and when it knows a digital or physical release date, the
+// earlier one must be past. Nothing is hidden on a guess: with no date, the
+// status decides.
+func movieOut(m arr.Movie, now time.Time) bool {
+	if m.Status != "" && m.Status != "released" {
 		return false
 	}
-	if len(sr.FirstAired) >= len("2006-01-02") {
-		if t, err := time.Parse("2006-01-02", sr.FirstAired[:10]); err == nil && t.After(time.Now()) {
-			return false
+	var first time.Time
+	for _, d := range []time.Time{m.DigitalRelease, m.PhysicalRelease} {
+		if !d.IsZero() && (first.IsZero() || d.Before(first)) {
+			first = d
 		}
 	}
-	return true
+	return first.IsZero() || first.Before(now.Add(-settle))
 }
 
 func (s *snapshot) missing() []storage.Finding {
 	var out []storage.Finding
 	for _, m := range s.movies {
-		if m.HasFile || !m.IsAvailable || !released(m.Status) {
+		if m.HasFile || !m.IsAvailable || !movieOut(m, time.Now()) {
 			continue
 		}
 		detail := "Released, monitored and has no file."
@@ -467,12 +468,20 @@ func (s *snapshot) missing() []storage.Finding {
 			Data: encode(fixData{App: appRadarr, ArrID: m.ID, Monitored: m.Monitored, TmdbID: m.TmdbID}),
 		})
 	}
+	// Sonarr lists only episodes that have aired. One that aired in the last few
+	// days is still on its way, and a series with nothing aired has nothing to get.
+	aired := map[int64][]arr.MissingEpisode{}
+	for _, e := range s.missingEpisodes {
+		if e.AirDateUtc.IsZero() || e.AirDateUtc.Before(time.Now().Add(-settle)) {
+			aired[e.SeriesID] = append(aired[e.SeriesID], e)
+		}
+	}
 	empty := map[int64]bool{}
 	for _, sr := range s.series {
 		if sr.Statistics.EpisodeFileCount == 0 {
 			empty[sr.ID] = true
-			if !seriesAired(sr) {
-				continue // nothing to get yet
+			if len(aired[sr.ID]) == 0 {
+				continue
 			}
 			out = append(out, storage.Finding{
 				Subject: fmt.Sprintf("series:%d", sr.TvdbID), Title: sr.Title, Severity: note, Detail: "In Sonarr with no files.",
@@ -482,9 +491,9 @@ func (s *snapshot) missing() []storage.Finding {
 	}
 	// A series with no files at all is already listed, so its episodes aren't.
 	bySeries := map[int64][]arr.MissingEpisode{}
-	for _, e := range s.missingEpisodes {
-		if !empty[e.SeriesID] {
-			bySeries[e.SeriesID] = append(bySeries[e.SeriesID], e)
+	for id, eps := range aired {
+		if !empty[id] {
+			bySeries[id] = eps
 		}
 	}
 	for id, eps := range bySeries {

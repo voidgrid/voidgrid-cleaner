@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 // Command starts a background task and returns its ID.
@@ -128,7 +129,9 @@ type MissingEpisode struct {
 	SeasonNumber  int    `json:"seasonNumber"`
 	EpisodeNumber int    `json:"episodeNumber"`
 	Title         string `json:"title"`
-	Series        struct {
+	// AirDateUtc is when it aired; zero when Sonarr doesn't say.
+	AirDateUtc time.Time `json:"airDateUtc"`
+	Series     struct {
 		Title string `json:"title"`
 	} `json:"series"`
 }

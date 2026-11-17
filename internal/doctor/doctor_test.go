@@ -1379,6 +1379,7 @@ func TestRemoveMissingMovieLeavesOneThatGotAFile(t *testing.T) {
 func TestRemoveSeriesLeavesOneThatGotFiles(t *testing.T) {
 	w := newWorld(t)
 	w.sonarr.series = []arr.Series{{ID: 4, Title: "Empty", TvdbID: 10, Path: w.root}}
+	w.sonarr.episodes = []arr.MissingEpisode{{ID: 1, SeriesID: 4, SeasonNumber: 1, EpisodeNumber: 1}}
 	w.run(t)
 	f := w.open(t, KindMissing)[0]
 	w.sonarr.fileCount = 2
@@ -2131,19 +2132,33 @@ func TestRecentRequestIsNotStale(t *testing.T) {
 	}
 }
 
-func TestUnreleasedIsNotMissing(t *testing.T) {
+func TestUnreleasedAndJustReleasedAreNotMissing(t *testing.T) {
 	w := newWorld(t)
-	future := time.Now().AddDate(0, 1, 0).Format("2006-01-02")
-	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 2, Title: "Soon", TmdbID: 2, IsAvailable: true, Status: "inCinemas"})
+	now := time.Now()
+	day := 24 * time.Hour
+	w.radarr.movies = append(w.radarr.movies,
+		arr.Movie{ID: 2, Title: "In Cinemas", TmdbID: 2, IsAvailable: true, Status: "inCinemas"},
+		arr.Movie{ID: 3, Title: "Not Digital Yet", TmdbID: 3, IsAvailable: true, Status: "released", DigitalRelease: now.Add(10 * day), PhysicalRelease: now.Add(40 * day)},
+		arr.Movie{ID: 4, Title: "Out Today", TmdbID: 4, IsAvailable: true, Status: "released", DigitalRelease: now.Add(-time.Hour)},
+		arr.Movie{ID: 5, Title: "Out Last Month", TmdbID: 5, IsAvailable: true, Status: "released", DigitalRelease: now.Add(-30 * day)},
+	)
 	w.sonarr.series = []arr.Series{
-		{ID: 4, Title: "Upcoming", TvdbID: 10, Path: w.root, Status: "upcoming"},
-		{ID: 5, Title: "Dated", TvdbID: 11, Path: w.root, FirstAired: future},
-		{ID: 6, Title: "Aired", TvdbID: 12, Path: w.root, Status: "continuing", FirstAired: "2010-01-01"},
+		{ID: 4, Title: "Nothing Aired", TvdbID: 10, Path: w.root},
+		{ID: 5, Title: "Aired Tonight", TvdbID: 11, Path: w.root},
+		{ID: 6, Title: "Really Missing", TvdbID: 12, Path: w.root},
+	}
+	w.sonarr.episodes = []arr.MissingEpisode{
+		{ID: 1, SeriesID: 5, SeasonNumber: 1, EpisodeNumber: 1, AirDateUtc: now.Add(-3 * time.Hour)},
+		{ID: 2, SeriesID: 6, SeasonNumber: 1, EpisodeNumber: 1, AirDateUtc: now.Add(-20 * day)},
 	}
 	w.run(t)
-	fs := w.open(t, KindMissing)
-	if len(fs) != 1 || fs[0].Title != "Aired" {
-		t.Fatalf("%+v", fs)
+	var got []string
+	for _, f := range w.open(t, KindMissing) {
+		got = append(got, f.Title)
+	}
+	slices.Sort(got)
+	if want := "[Out Last Month (0) Really Missing]"; fmt.Sprint(got) != want {
+		t.Fatalf("got %v, want %s", got, want)
 	}
 }
 
@@ -2156,6 +2171,7 @@ func TestRemoveEmptySeriesFromSeerrDiskAndSonarr(t *testing.T) {
 	}
 	w.sonarr.seriesPath = folder
 	w.sonarr.series = []arr.Series{{ID: 4, Title: "Empty", TvdbID: 10, TmdbID: 50, Path: folder}}
+	w.sonarr.episodes = []arr.MissingEpisode{{ID: 1, SeriesID: 4, SeasonNumber: 1, EpisodeNumber: 1}}
 	w.run(t) // learns the paths
 	if err := w.d.DB.SetManagedPaths(ctx, []string{w.root}); err != nil {
 		t.Fatal(err)
