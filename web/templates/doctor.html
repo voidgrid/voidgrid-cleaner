@@ -4,7 +4,18 @@
 <div data-live>
 {{with .Doctor}}
 <form class="inline-form" method="post" action="/doctor/check"><button type="submit">check now</button></form>
-<p class="muted">runs after each sync. {{if .Dismissed}}<a href="/doctor">show open</a>{{else}}{{if .DismissedCount}}<a href="/doctor?dismissed=1">show {{.DismissedCount}} dismissed</a>{{end}}{{end}}</p>
+<p class="muted">runs after each sync. {{if or .Dismissed .ShowFixes}}<a href="/doctor">show open</a>{{else}}{{if .DismissedCount}}<a href="/doctor?dismissed=1">show {{.DismissedCount}} dismissed</a>{{end}}{{if .Fixes}} <a href="/doctor?fixes=1">show {{len .Fixes}} fixes</a> (last 14 days){{end}}{{end}}</p>
+{{if .ShowFixes}}
+<h2>fixes <span class="muted">(last 14 days)</span></h2>
+<table>
+    <thead><tr><th>item</th><th>result</th><th>detail</th><th>finished</th></tr></thead>
+    <tbody>
+    {{range .Fixes}}
+    <tr><td>{{.Title}}</td><td>{{.State}}</td><td class="muted">{{.Detail}}</td><td>{{if .FinishedAt}}{{when .FinishedAt}}{{end}}</td></tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
 {{range .Groups}}
 <section>
 <h2>{{.Label}} <span class="muted">({{len .Findings}})</span></h2>
@@ -28,16 +39,6 @@
 {{else}}
 <p class="muted">{{if .Dismissed}}nothing dismissed.{{else}}nothing to report.{{end}}</p>
 {{end}}
-{{if .Fixes}}
-<h2>fixes</h2>
-<table>
-    <thead><tr><th>item</th><th>result</th><th>detail</th><th>finished</th></tr></thead>
-    <tbody>
-    {{range .Fixes}}
-    <tr><td>{{.Title}}</td><td>{{.State}}</td><td class="muted">{{.Detail}}</td><td>{{if .FinishedAt}}{{when .FinishedAt}}{{end}}</td></tr>
-    {{end}}
-    </tbody>
-</table>
 {{end}}
 {{end}}
 </div>

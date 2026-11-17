@@ -1096,6 +1096,15 @@ func TestDoctorPreviewAndApply(t *testing.T) {
 	if len(js) != 1 || js[0].Who != "admin" || js[0].Title != "Bad Match" {
 		t.Fatalf("%+v", js)
 	}
+	// Fixes are a line at the top, like dismissed, and a page of their own.
+	b = body(t, get(t, c, app.URL+"/doctor"))
+	if !strings.Contains(b, "show 1 fixes") || strings.Contains(b, "<h2>fixes") {
+		t.Fatalf("fixes line: %s", b)
+	}
+	b = body(t, get(t, c, app.URL+"/doctor?fixes=1"))
+	if !strings.Contains(b, "<h2>fixes") || !strings.Contains(b, "Bad Match") || !strings.Contains(b, "show open") {
+		t.Fatalf("fixes page: %s", b)
+	}
 }
 
 func TestDoctorFixesAdminOnly(t *testing.T) {

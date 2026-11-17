@@ -117,6 +117,7 @@ type doctorPage struct {
 	Groups         []findingGroup
 	Dismissed      bool
 	DismissedCount int
+	ShowFixes      bool // the fixes from the last 14 days, in place of the findings
 	Fixes          []storage.FixJob
 	Previews       []doctor.Preview
 }
@@ -763,6 +764,7 @@ func (s *Server) joinEphemeral(w http.ResponseWriter, r *http.Request) {
 func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	dismissed := r.URL.Query().Get("dismissed") == "1"
+	showFixes := r.URL.Query().Get("fixes") == "1"
 	state := "open"
 	if dismissed {
 		state = "dismissed"
@@ -779,13 +781,17 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	fixes, err := s.DB.RecentFixes(r.Context(), recentFixes)
+	fixes, err := s.DB.FixesSince(r.Context(), time.Now())
 	if err != nil {
 		log.Printf("web: fixes: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other), Fixes: fixes}
+	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other), ShowFixes: showFixes, Fixes: fixes}
+	if showFixes {
+		render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
+		return
+	}
 	for _, l := range doctor.Labels {
 		// Naming splits by kind of rename, so tick all is safe on the harmless ones.
 		labels := []string{l.Label}
@@ -811,9 +817,6 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 	}
 	render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
 }
-
-// recentFixes is how many finished fixes the doctor page shows.
-const recentFixes = 15
 
 // doctorPreview shows what the ticked fixes would do. It changes nothing.
 func (s *Server) doctorPreview(w http.ResponseWriter, r *http.Request) {

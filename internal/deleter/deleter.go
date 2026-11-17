@@ -142,6 +142,9 @@ func (w *Worker) Tick(ctx context.Context) {
 		if err := w.DB.PruneAudit(ctx, w.Now()); err != nil {
 			log.Printf("deleter: prune audit log: %v", err)
 		}
+		if err := w.DB.PruneFixes(ctx, w.Now()); err != nil {
+			log.Printf("deleter: prune fixes: %v", err)
+		}
 	}
 	window, err := w.DB.DeleteWindow(ctx)
 	if err != nil {

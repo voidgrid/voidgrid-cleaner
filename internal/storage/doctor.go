@@ -489,6 +489,35 @@ func (db *DB) RecentFixes(ctx context.Context, limit int) ([]FixJob, error) {
 	return out, rows.Err()
 }
 
+// FixKeep is how long finished fixes are kept and shown.
+const FixKeep = 14 * 24 * time.Hour
+
+// FixesSince lists the fixes from the last FixKeep, newest first.
+func (db *DB) FixesSince(ctx context.Context, now time.Time) ([]FixJob, error) {
+	rows, err := db.QueryContext(ctx, `SELECT `+fixCols+` FROM fix_jobs j JOIN findings f ON f.id = j.finding_id
+		WHERE j.created_at >= ? ORDER BY j.id DESC`, now.Add(-FixKeep).Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []FixJob
+	for rows.Next() {
+		j, err := scanFix(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// PruneFixes deletes finished fixes older than FixKeep. Queued and running ones stay.
+func (db *DB) PruneFixes(ctx context.Context, now time.Time) error {
+	_, err := db.ExecContext(ctx, `DELETE FROM fix_jobs WHERE state NOT IN ('queued', 'running')
+		AND coalesce(nullif(finished_at, 0), created_at) < ?`, now.Add(-FixKeep).Unix())
+	return err
+}
+
 // HasActiveArrDeletion is HasActiveDeletion for a Radarr or Sonarr ID.
 func (db *DB) HasActiveArrDeletion(ctx context.Context, sonarr bool, arrID int64) (bool, error) {
 	mediaType := "movie"

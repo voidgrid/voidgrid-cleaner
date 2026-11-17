@@ -600,6 +600,43 @@ func TestQueueFixesIsOneBatchAndLogsEach(t *testing.T) {
 	}
 }
 
+func TestFixHistoryKeepsFourteenDays(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.SaveFindings(ctx, "naming", []Finding{{Subject: "a", Title: "Old", Severity: "note"}, {Subject: "b", Title: "New", Severity: "note"}, {Subject: "c", Title: "Waiting", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := db.Findings(ctx, "open")
+	var batch []QueuedFix
+	for _, f := range fs {
+		batch = append(batch, QueuedFix{FindingID: f.ID, Title: f.Title})
+	}
+	if err := db.QueueFixes(ctx, "me", batch); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old, recent := now.Add(-20*24*time.Hour).Unix(), now.Add(-2*24*time.Hour).Unix()
+	for title, at := range map[string]int64{"Old": old, "New": recent} {
+		if _, err := db.ExecContext(ctx, `UPDATE fix_jobs SET state = 'done', created_at = ?, finished_at = ? WHERE finding_id = (SELECT id FROM findings WHERE title = ?)`, at, at, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "Waiting" is still queued, and old: it must survive.
+	if _, err := db.ExecContext(ctx, `UPDATE fix_jobs SET created_at = ? WHERE state = 'queued'`, old); err != nil {
+		t.Fatal(err)
+	}
+	if js, err := db.FixesSince(ctx, now); err != nil || len(js) != 1 || js[0].Title != "New" {
+		t.Fatalf("the page should list only the last 14 days: %+v %v", js, err)
+	}
+	if err := db.PruneFixes(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM fix_jobs`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("want the recent and the queued job, have %d (%v)", n, err)
+	}
+}
+
 func TestEpisodeWaitsNameWhoIsBehind(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
