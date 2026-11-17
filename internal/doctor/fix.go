@@ -16,20 +16,30 @@ import (
 
 // fixData is what a finding carries for its fix.
 type fixData struct {
-	RatingKey  string  `json:"rating_key,omitempty"`
-	Section    string  `json:"section,omitempty"`
-	Library    string  `json:"library,omitempty"`
-	Type       string  `json:"type,omitempty"` // "movie" or "show"
-	Agent      string  `json:"agent,omitempty"`
-	WantID     string  `json:"want_id,omitempty"`
-	ArrTitle   string  `json:"arr_title,omitempty"`
-	ArrYear    int     `json:"arr_year,omitempty"`
-	App        string  `json:"app,omitempty"` // "radarr" or "sonarr"
-	ArrID      int64   `json:"arr_id,omitempty"`
-	FileID     int64   `json:"file_id,omitempty"`
-	OldName    string  `json:"old_name,omitempty"`
-	NewName    string  `json:"new_name,omitempty"`
-	Folder     string  `json:"folder,omitempty"`
+	RatingKey string `json:"rating_key,omitempty"`
+	Section   string `json:"section,omitempty"`
+	Library   string `json:"library,omitempty"`
+	Type      string `json:"type,omitempty"` // "movie" or "show"
+	Agent     string `json:"agent,omitempty"`
+	WantID    string `json:"want_id,omitempty"`
+	ArrTitle  string `json:"arr_title,omitempty"`
+	ArrYear   int    `json:"arr_year,omitempty"`
+	App       string `json:"app,omitempty"` // "radarr" or "sonarr"
+	ArrID     int64  `json:"arr_id,omitempty"`
+	TmdbID    int64  `json:"tmdb_id,omitempty"`
+	TvdbID    int64  `json:"tvdb_id,omitempty"`
+	FileID    int64  `json:"file_id,omitempty"`
+	OldName   string `json:"old_name,omitempty"`
+	NewName   string `json:"new_name,omitempty"`
+	// OldPath and NewPath are a rename's whole paths, as the app gives them, so a
+	// change outside the file name is visible.
+	OldPath string `json:"old_path,omitempty"`
+	NewPath string `json:"new_path,omitempty"`
+	Folder  string `json:"folder,omitempty"`
+	// Keep is the season folder that stays when Folder, its duplicate, goes.
+	// Reason, when set, is why Folder can't be removed.
+	Keep       string  `json:"keep,omitempty"`
+	Reason     string  `json:"reason,omitempty"`
 	Root       string  `json:"root,omitempty"`
 	MediaID    int64   `json:"media_id,omitempty"`
 	Monitored  bool    `json:"monitored,omitempty"`
@@ -57,7 +67,7 @@ const localPrefix = "plex:local:"
 func Fixable(kind, subject string) bool {
 	return kind == KindWrongMatch || kind == KindQuestionable || kind == KindUntracked || kind == KindNotAccepted ||
 		kind == KindMissing || kind == KindStuck || (kind == KindHealth && strings.HasPrefix(subject, removedPrefix)) || kind == KindReleaseTitle || kind == KindNaming ||
-		kind == KindStaleRequest || kind == KindEmptyFolder || kind == KindStrayFile ||
+		kind == KindStaleRequest || kind == KindEmptyFolder || kind == KindStrayFile || kind == KindDuplicateSeason ||
 		(kind == KindSettings && (strings.HasPrefix(subject, localPrefix) || subject == emptyFoldersSubject))
 }
 

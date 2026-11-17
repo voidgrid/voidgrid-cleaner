@@ -4,7 +4,7 @@
 
 # Test toolchain shared by the image build and scripts/test.sh. gcc and
 # musl-dev are only for `-race` (cgo); the SQLite driver is pure Go.
-FROM golang:1.26-alpine AS testenv
+FROM golang:1.27-alpine AS testenv
 RUN apk add --no-cache gcc musl-dev
 
 # Tests gate the image: a failing vet or test fails the build.

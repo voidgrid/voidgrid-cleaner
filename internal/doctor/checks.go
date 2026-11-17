@@ -432,10 +432,30 @@ func (s *snapshot) health() []storage.Finding {
 	return out
 }
 
+// released says a movie's status is past announced and in cinemas. An unknown
+// status counts as released, so nothing is hidden on a guess.
+func released(status string) bool {
+	return status == "" || status == "released"
+}
+
+// seriesAired says a series has started. One not yet aired has no files to
+// get, so it isn't missing any.
+func seriesAired(sr arr.Series) bool {
+	if sr.Status == "upcoming" {
+		return false
+	}
+	if len(sr.FirstAired) >= len("2006-01-02") {
+		if t, err := time.Parse("2006-01-02", sr.FirstAired[:10]); err == nil && t.After(time.Now()) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *snapshot) missing() []storage.Finding {
 	var out []storage.Finding
 	for _, m := range s.movies {
-		if m.HasFile || !m.IsAvailable {
+		if m.HasFile || !m.IsAvailable || !released(m.Status) {
 			continue
 		}
 		detail := "Released, monitored and has no file."
@@ -444,16 +464,19 @@ func (s *snapshot) missing() []storage.Finding {
 		}
 		out = append(out, storage.Finding{
 			Subject: fmt.Sprintf("movie:%d", m.TmdbID), Title: fmt.Sprintf("%s (%d)", m.Title, m.Year), Severity: note, Detail: detail,
-			Data: encode(fixData{App: appRadarr, ArrID: m.ID, Monitored: m.Monitored}),
+			Data: encode(fixData{App: appRadarr, ArrID: m.ID, Monitored: m.Monitored, TmdbID: m.TmdbID}),
 		})
 	}
 	empty := map[int64]bool{}
 	for _, sr := range s.series {
 		if sr.Statistics.EpisodeFileCount == 0 {
 			empty[sr.ID] = true
+			if !seriesAired(sr) {
+				continue // nothing to get yet
+			}
 			out = append(out, storage.Finding{
 				Subject: fmt.Sprintf("series:%d", sr.TvdbID), Title: sr.Title, Severity: note, Detail: "In Sonarr with no files.",
-				Data: encode(fixData{App: appSonarr, ArrID: sr.ID}),
+				Data: encode(fixData{App: appSonarr, ArrID: sr.ID, TmdbID: sr.TmdbID, TvdbID: sr.TvdbID}),
 			})
 		}
 	}
@@ -534,14 +557,17 @@ func (d *Doctor) naming(ctx context.Context, s *snapshot) ([]storage.Finding, er
 	}
 	out := make([]storage.Finding, 0, len(renames))
 	for _, r := range renames {
-		data := fixData{App: appRadarr, ArrID: r.MovieID, FileID: r.MovieFileID, OldName: path.Base(r.ExistingPath), NewName: path.Base(r.NewPath)}
+		data := fixData{App: appRadarr, ArrID: r.MovieID, FileID: r.MovieFileID, OldName: path.Base(r.ExistingPath), NewName: path.Base(r.NewPath), OldPath: r.ExistingPath, NewPath: r.NewPath}
 		if r.SeriesID != 0 {
 			data.App, data.ArrID, data.FileID = appSonarr, r.SeriesID, r.EpisodeFileID
 		}
-		out = append(out, storage.Finding{Subject: fmt.Sprintf("%s:%d", data.App, data.FileID), Title: data.OldName, Severity: note, Detail: "Would become " + data.NewName, Data: encode(data)})
+		out = append(out, storage.Finding{Subject: fmt.Sprintf("%s:%d", data.App, data.FileID), Title: data.OldName, Severity: note, Detail: renameDetail(data), Data: encode(data)})
 	}
 	return out, nil
 }
+
+// recentRequest is how long a request may go unmatched before it counts as stale.
+const recentRequest = 14 * 24 * time.Hour
 
 func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Finding, error) {
 	movies, series := map[int64]bool{}, map[int64]bool{}
@@ -561,6 +587,9 @@ func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Find
 	for _, r := range reqs {
 		if (r.Type == "movie" && movies[r.TmdbID]) || (r.Type == "tv" && (series[r.TvdbID.Int64] || seriesTmdb[r.TmdbID])) {
 			continue
+		}
+		if r.RequestedAt > time.Now().Add(-recentRequest).Unix() {
+			continue // still on its way: approval and downloads take time
 		}
 		detail := "Requested in Seerr"
 		if r.Requesters != "" {

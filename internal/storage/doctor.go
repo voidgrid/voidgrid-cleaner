@@ -539,3 +539,14 @@ func (db *DB) DiscordAdmin(ctx context.Context, discordID, discordName string) (
 	}
 	return name, admin, err
 }
+
+// SeerrMediaID finds the Seerr media a movie ("movie") or show ("tv") was
+// requested as, by its TMDB or TVDB ID. ok is false if nobody requested it.
+func (db *DB) SeerrMediaID(ctx context.Context, mediaType string, tmdb, tvdb int64) (id int64, ok bool, err error) {
+	err = db.QueryRowContext(ctx, `SELECT seerr_media_id FROM requests
+		WHERE media_type = ? AND ((? <> 0 AND tmdb_id = ?) OR (? <> 0 AND tvdb_id = ?)) LIMIT 1`, mediaType, tmdb, tmdb, tvdb, tvdb).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
+}

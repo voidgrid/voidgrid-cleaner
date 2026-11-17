@@ -64,6 +64,7 @@ var Labels = []struct{ Kind, Label string }{
 	{KindNaming, "naming"},
 	{KindStrayFile, "stray file"},
 	{KindEmptyFolder, "empty folder"},
+	{KindDuplicateSeason, "duplicate season folder"},
 	{KindSettings, "settings"},
 	{KindWatchDrift, "plex and tautulli disagree"},
 }
@@ -100,6 +101,7 @@ type (
 		UnmonitorMovie(context.Context, int64) error
 		MonitorMovie(context.Context, int64) error
 		RemoveMovie(context.Context, int64) error
+		RemoveMovieAndFiles(context.Context, int64) error
 	}
 	SonarrAPI interface {
 		ArrAPI
@@ -111,6 +113,7 @@ type (
 		UnmonitorSeries(context.Context, int64) error
 		UnmonitorEpisodes(context.Context, []int64) error
 		RemoveSeries(context.Context, int64) error
+		RemoveSeriesAndFiles(context.Context, int64) error
 		LookupSeries(context.Context, string) ([]map[string]any, error)
 		AddSeries(context.Context, map[string]any) (int64, error)
 	}
@@ -339,6 +342,10 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	tryFind(all && disk, KindStrayFile, func() ([]storage.Finding, error) {
 		fs, err := d.strayFiles(ctx, &s)
 		return frozen(KindStrayFile, fs), err
+	})
+	tryFind(arrs && disk, KindDuplicateSeason, func() ([]storage.Finding, error) {
+		fs, err := d.duplicateSeasons(ctx, &s)
+		return frozen(KindDuplicateSeason, fs), err
 	})
 	save(arrs, KindHealth, s.health)
 	save(arrs, KindMissing, s.missing)

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -33,7 +34,11 @@ func (d *Doctor) previewArr(ctx context.Context, p *Preview, data fixData) error
 	switch p.Finding.Kind {
 	case KindNaming:
 		p.CanFix = true
-		p.Lines = []string{fmt.Sprintf("Rename %s to %s.", data.OldName, data.NewName), "Plex follows the new name on its next scan."}
+		p.Lines = []string{fmt.Sprintf("Rename %s to %s.", cmp.Or(data.OldPath, data.OldName), cmp.Or(data.NewPath, data.NewName))}
+		if note := changeNote(data); note != "" {
+			p.Lines = append(p.Lines, note)
+		}
+		p.Lines = append(p.Lines, "Plex follows the new name on its next scan.")
 	case KindUntracked:
 		return d.previewUntracked(ctx, p, data)
 	case KindNotAccepted:

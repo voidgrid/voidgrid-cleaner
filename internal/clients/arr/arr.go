@@ -135,6 +135,7 @@ type Movie struct {
 	TmdbID           int64      `json:"tmdbId"`
 	Monitored        bool       `json:"monitored"`
 	HasFile          bool       `json:"hasFile"`
+	Status           string     `json:"status"` // tba, announced, inCinemas, released
 	SizeOnDisk       int64      `json:"sizeOnDisk"`
 	Path             string     `json:"path"`
 	RootFolderPath   string     `json:"rootFolderPath"`
@@ -198,6 +199,8 @@ type Series struct {
 	TvdbID           int64      `json:"tvdbId"`
 	TmdbID           int64      `json:"tmdbId"`
 	Monitored        bool       `json:"monitored"`
+	Status           string     `json:"status"`     // continuing, ended, upcoming
+	FirstAired       string     `json:"firstAired"` // a date, when known
 	Path             string     `json:"path"`
 	RootFolderPath   string     `json:"rootFolderPath"`
 	Added            time.Time  `json:"added"`

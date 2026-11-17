@@ -167,3 +167,15 @@ func (r *Radarr) RemoveMovie(ctx context.Context, movieID int64) error {
 func (s *Sonarr) RemoveSeries(ctx context.Context, seriesID int64) error {
 	return s.call(ctx, http.MethodDelete, "/api/v3/series/"+id(seriesID)+"?deleteFiles=false&addImportListExclusion=false", nil, nil)
 }
+
+// RemoveMovieAndFiles takes a movie out of Radarr and deletes its folder. It
+// adds no exclusion, so it can be added again.
+func (r *Radarr) RemoveMovieAndFiles(ctx context.Context, movieID int64) error {
+	return r.call(ctx, http.MethodDelete, "/api/v3/movie/"+id(movieID)+"?deleteFiles=true&addImportExclusion=false", nil, nil)
+}
+
+// RemoveSeriesAndFiles takes a series out of Sonarr and deletes its folder. It
+// adds no exclusion, so it can be added again.
+func (s *Sonarr) RemoveSeriesAndFiles(ctx context.Context, seriesID int64) error {
+	return s.call(ctx, http.MethodDelete, "/api/v3/series/"+id(seriesID)+"?deleteFiles=true&addImportListExclusion=false", nil, nil)
+}

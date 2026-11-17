@@ -22,7 +22,7 @@ import (
 const leftoverFile = ".plexmatch"
 
 func isDiskFix(f storage.Finding) bool {
-	return f.Kind == KindEmptyFolder || f.Kind == KindStrayFile || f.Kind == KindStaleRequest
+	return f.Kind == KindEmptyFolder || f.Kind == KindStrayFile || f.Kind == KindStaleRequest || f.Kind == KindDuplicateSeason
 }
 
 func (d *Doctor) previewDisk(ctx context.Context, p *Preview, data fixData) {
@@ -30,6 +30,8 @@ func (d *Doctor) previewDisk(ctx context.Context, p *Preview, data fixData) {
 	switch p.Finding.Kind {
 	case KindStaleRequest:
 		p.Lines = []string{"Remove " + p.Finding.Title + " and its requests from Seerr, so it can be requested again.", "Nothing changes in Radarr, Sonarr, Plex or on disk."}
+	case KindDuplicateSeason:
+		d.previewDuplicateSeason(p, data)
 	case KindEmptyFolder:
 		p.Lines = []string{"Remove " + data.Folder + ". It holds no media.", "If anything else has appeared in it by then, it's left alone."}
 	case KindStrayFile:
@@ -49,6 +51,8 @@ func (d *Doctor) applyDisk(ctx context.Context, f storage.Finding, data fixData)
 	switch f.Kind {
 	case KindStaleRequest:
 		return d.applyStale(ctx, data)
+	case KindDuplicateSeason:
+		return d.applyDuplicateSeason(ctx, data)
 	case KindEmptyFolder:
 		return d.applyEmptyFolder(ctx, data)
 	}

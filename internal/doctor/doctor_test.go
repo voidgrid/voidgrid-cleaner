@@ -75,7 +75,8 @@ func (f *fakeArr) CommandStatus(context.Context, int64) (string, string, error) 
 
 type fakeRadarr struct {
 	fakeArr
-	movies []arr.Movie
+	moviePath string
+	movies    []arr.Movie
 
 	gotFile        bool
 	added          map[string]any
@@ -91,7 +92,7 @@ func (f *fakeRadarr) RenamePreview(context.Context, []int64) ([]arr.Rename, erro
 }
 
 func (f *fakeRadarr) Movie(_ context.Context, id int64) (arr.Movie, error) {
-	return arr.Movie{ID: id, Title: "Added", HasFile: f.gotFile}, nil
+	return arr.Movie{ID: id, Title: "Added", HasFile: f.gotFile, Path: f.moviePath}, nil
 }
 
 func (f *fakeRadarr) LookupMovies(_ context.Context, term string) ([]map[string]any, error) {
@@ -124,6 +125,11 @@ func (f *fakeRadarr) MonitorMovie(_ context.Context, id int64) error {
 	return nil
 }
 
+func (f *fakeRadarr) RemoveMovieAndFiles(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("remove movie and files %d", id))
+	return nil
+}
+
 func (f *fakeRadarr) RemoveMovie(_ context.Context, id int64) error {
 	f.calls = append(f.calls, fmt.Sprintf("remove %d", id))
 	return nil
@@ -143,11 +149,13 @@ func (f *fakeRadarr) SetMediaManagement(_ context.Context, s map[string]any) err
 
 type fakeSonarr struct {
 	fakeArr
-	series   []arr.Series
-	files    []arr.EpisodeFile
-	filesErr error
-	added    map[string]any
+	seriesPath string
+	series     []arr.Series
+	files      []arr.EpisodeFile
+	filesErr   error
+	added      map[string]any
 
+	renames   []arr.Rename
 	episodes  []arr.MissingEpisode
 	fileCount int
 	calls     []string
@@ -155,7 +163,7 @@ type fakeSonarr struct {
 
 func (f *fakeSonarr) Series(context.Context) ([]arr.Series, error) { return f.series, nil }
 func (f *fakeSonarr) RenamePreview(context.Context, int64) ([]arr.Rename, error) {
-	return nil, nil
+	return f.renames, nil
 }
 
 func (f *fakeSonarr) EpisodeFiles(context.Context, int64) ([]arr.EpisodeFile, error) {
@@ -171,7 +179,7 @@ func (f *fakeSonarr) MissingEpisodes(context.Context) ([]arr.MissingEpisode, err
 }
 
 func (f *fakeSonarr) OneSeries(_ context.Context, id int64) (arr.Series, error) {
-	s := arr.Series{ID: id}
+	s := arr.Series{ID: id, Path: f.seriesPath}
 	s.Statistics.EpisodeFileCount = f.fileCount
 	return s, nil
 }
@@ -188,6 +196,11 @@ func (f *fakeSonarr) UnmonitorEpisodes(_ context.Context, ids []int64) error {
 
 func (f *fakeSonarr) RemoveSeries(_ context.Context, id int64) error {
 	f.calls = append(f.calls, fmt.Sprintf("remove series %d", id))
+	return nil
+}
+
+func (f *fakeSonarr) RemoveSeriesAndFiles(_ context.Context, id int64) error {
+	f.calls = append(f.calls, fmt.Sprintf("remove series and files %d", id))
 	return nil
 }
 
@@ -1358,7 +1371,7 @@ func TestRemoveMissingMovieLeavesOneThatGotAFile(t *testing.T) {
 	w := newWorld(t)
 	f := w.missingMovie(t, true)
 	w.radarr.gotFile = true
-	if j := w.fix(t, f, doRemove); j.State != "failed" || len(w.radarr.calls) != 0 {
+	if j := w.fix(t, f, doRemoveAll); j.State != "failed" || len(w.radarr.calls) != 0 {
 		t.Fatalf("%+v %v", j, w.radarr.calls)
 	}
 }
@@ -1369,7 +1382,7 @@ func TestRemoveSeriesLeavesOneThatGotFiles(t *testing.T) {
 	w.run(t)
 	f := w.open(t, KindMissing)[0]
 	w.sonarr.fileCount = 2
-	if j := w.fix(t, f, doRemove); j.State != "failed" || len(w.sonarr.calls) != 0 {
+	if j := w.fix(t, f, doRemoveAll); j.State != "failed" || len(w.sonarr.calls) != 0 {
 		t.Fatalf("%+v %v", j, w.sonarr.calls)
 	}
 }
@@ -1634,6 +1647,7 @@ func TestStuckDownloadWithUnknownFilesOffersNoImport(t *testing.T) {
 func TestNamingGroups(t *testing.T) {
 	for want, names := range map[string][2]string{
 		"capital letters only":        {"A Bit Of Advice WEBDL-720p.mkv", "A Bit of Advice WEBDL-720p.mkv"},
+		"folder or path only":         {"S01E03 - Sin WEBDL-1080p.mkv", "S01E03 - Sin WEBDL-1080p.mkv"},
 		"punctuation only":            {"August Rush (2007) Bluray-1080p.mkv", "August Rush - (2007) - Bluray-1080p.mkv"},
 		"part number only":            {"S01E05 - Now and Then (2) WEBDL-1080p.mkv", "S01E05 - Now and Then WEBDL-1080p.mkv"},
 		"quality label only":          {"S08E08 - Renewal Bluray-1080p.mkv", "S08E08 - Renewal Bluray-1080p Remux.mkv"},
@@ -1653,6 +1667,18 @@ func TestNamingGroups(t *testing.T) {
 	f := storage.Finding{Data: encode(fixData{App: appSonarr, OldName: "S01E01 - The Unknown Soldier WEBDL-1080p.mkv", NewName: "S01E01 - The Unknown Known WEBDL-1080p.mkv"})}
 	if got := NamingGroup(f); got != "episode title changed" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRenameDetailShowsWhatChanges(t *testing.T) {
+	d := fixData{OldName: "Failure's WEBRip-1080p.mkv", NewName: "Failure\u2019s WEBRip-1080p.mkv"}
+	got := renameDetail(d)
+	if !strings.Contains(got, "U+0027") || !strings.Contains(got, "U+2019") {
+		t.Fatal(got)
+	}
+	d = fixData{OldName: "a.mkv", NewName: "a.mkv", OldPath: "Season 1/a.mkv", NewPath: "Season 01/a.mkv"}
+	if got := renameDetail(d); !strings.Contains(got, "Season 01/a.mkv") || !strings.Contains(got, "folder or path") {
+		t.Fatal(got)
 	}
 }
 
@@ -2001,5 +2027,161 @@ func TestMissingMountHoldsOnlyItsOwnFindings(t *testing.T) {
 	fs := w.open(t, KindStrayFile)
 	if len(fs) != 1 || !strings.HasPrefix(fs[0].Subject, w.root+"/") {
 		t.Fatalf("want only the one under the missing mount: %+v", fs)
+	}
+}
+
+// duplicateSeason makes a show with "Season 01" holding what Sonarr tracks and
+// "Season 1" holding copies, and returns the finding for the first.
+func (w *world) duplicateSeason(t *testing.T, copies ...string) (finding storage.Finding, extra, keep string) {
+	t.Helper()
+	show := filepath.Join(w.root, "Show")
+	extra, keep = filepath.Join(show, "Season 01"), filepath.Join(show, "Season 1")
+	for _, d := range []string{extra, keep} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(extra, "[Grp] Show S01E01 [1080p].mkv"), filepath.Join(extra, "Show - S01E02 - Two Bluray-1080p.mkv"),
+	} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range copies {
+		if err := os.WriteFile(filepath.Join(keep, c), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.sonarr.series = []arr.Series{{ID: 3, Title: "Show", TvdbID: 9, Path: show}}
+	w.sonarr.series[0].Statistics.EpisodeFileCount = 2
+	w.sonarr.files = []arr.EpisodeFile{{Path: filepath.Join(extra, "Show - S01E02 - Two Bluray-1080p.mkv")}}
+	w.sonarr.renames = []arr.Rename{{SeriesID: 3, EpisodeFileID: 1, ExistingPath: "Season 01/Show - S01E02 - Two Bluray-1080p.mkv", NewPath: "Season 1/Show - S01E02 - Two Bluray-1080p.mkv"}}
+	w.plex.items["1"] = w.plex.items["1"][:1]
+	w.run(t) // learns the paths
+	if err := w.d.DB.SetManagedPaths(context.Background(), []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindDuplicateSeason)
+	if len(fs) != 1 || fs[0].Subject != extra {
+		t.Fatalf("%+v", fs)
+	}
+	return fs[0], extra, keep
+}
+
+func TestDuplicateSeasonRemovedWhenEveryEpisodeIsInTheOther(t *testing.T) {
+	w := newWorld(t)
+	f, extra, keep := w.duplicateSeason(t, "Show - S01E01 - One Bluray-1080p.mkv", "Show - S01E02 - Two Bluray-1080p.mkv")
+	if strings.Contains(f.Detail, "Not removable") {
+		t.Fatal(f.Detail)
+	}
+	if j := w.fix(t, f, ""); j.State != "done" {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(extra); !os.IsNotExist(err) {
+		t.Fatal("still there", err)
+	}
+	if _, err := os.Stat(filepath.Join(keep, "Show - S01E02 - Two Bluray-1080p.mkv")); err != nil {
+		t.Fatal("removed the kept folder's file", err)
+	}
+	if len(w.sonarr.commands) != 1 || w.sonarr.commands[0]["name"] != "RescanSeries" {
+		t.Fatalf("no rescan: %v", w.sonarr.commands)
+	}
+}
+
+func TestDuplicateSeasonKeptWhenAnEpisodeIsOnlyInIt(t *testing.T) {
+	w := newWorld(t)
+	f, extra, _ := w.duplicateSeason(t, "Show - S01E02 - Two Bluray-1080p.mkv")
+	if !strings.Contains(f.Detail, "only it has 1x1") {
+		t.Fatal(f.Detail)
+	}
+	if j := w.fix(t, f, ""); j.State == "done" {
+		t.Fatalf("removed a folder holding an episode nothing else has: %+v", j)
+	}
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDuplicateSeasonDryRunRemovesNothing(t *testing.T) {
+	w := newWorld(t)
+	w.d.DryRun = true
+	f, extra, _ := w.duplicateSeason(t, "Show - S01E01 - One Bluray-1080p.mkv", "Show - S01E02 - Two Bluray-1080p.mkv")
+	if j := w.fix(t, f, ""); j.State != "done" || !strings.Contains(j.Detail, "dry run") {
+		t.Fatalf("%+v", j)
+	}
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatal("a dry run removed a folder", err)
+	}
+}
+
+func TestRecentRequestIsNotStale(t *testing.T) {
+	w := newWorld(t)
+	now := time.Now().Unix()
+	if err := w.d.DB.ReplaceRequests(context.Background(), []storage.Request{
+		{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "movie", TmdbID: 42, Status: 2, CreatedAt: now - 3*86400},
+		{SeerrRequestID: 2, SeerrMediaID: 8, SeerrUserID: 1, MediaType: "movie", TmdbID: 43, Status: 2, CreatedAt: now - 30*86400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	if fs := w.open(t, KindStaleRequest); len(fs) != 1 || fs[0].Subject != "8" {
+		t.Fatalf("%+v", fs)
+	}
+}
+
+func TestUnreleasedIsNotMissing(t *testing.T) {
+	w := newWorld(t)
+	future := time.Now().AddDate(0, 1, 0).Format("2006-01-02")
+	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 2, Title: "Soon", TmdbID: 2, IsAvailable: true, Status: "inCinemas"})
+	w.sonarr.series = []arr.Series{
+		{ID: 4, Title: "Upcoming", TvdbID: 10, Path: w.root, Status: "upcoming"},
+		{ID: 5, Title: "Dated", TvdbID: 11, Path: w.root, FirstAired: future},
+		{ID: 6, Title: "Aired", TvdbID: 12, Path: w.root, Status: "continuing", FirstAired: "2010-01-01"},
+	}
+	w.run(t)
+	fs := w.open(t, KindMissing)
+	if len(fs) != 1 || fs[0].Title != "Aired" {
+		t.Fatalf("%+v", fs)
+	}
+}
+
+func TestRemoveEmptySeriesFromSeerrDiskAndSonarr(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	folder := filepath.Join(w.root, "Empty")
+	if err := os.MkdirAll(folder, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	w.sonarr.seriesPath = folder
+	w.sonarr.series = []arr.Series{{ID: 4, Title: "Empty", TvdbID: 10, TmdbID: 50, Path: folder}}
+	w.run(t) // learns the paths
+	if err := w.d.DB.SetManagedPaths(ctx, []string{w.root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.d.DB.ReplaceRequests(ctx, []storage.Request{{SeerrRequestID: 1, SeerrMediaID: 9, SeerrUserID: 1, MediaType: "tv", TmdbID: 50, Status: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	f := w.open(t, KindMissing)[0]
+	p, err := w.d.Preview(ctx, f)
+	if err != nil || !strings.Contains(p.Choices[2].Label, "Seerr, disk and Sonarr") {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "stray.mkv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, doRemoveAll); j.State != "failed" || len(w.sonarr.calls) != 0 {
+		t.Fatalf("removed a folder holding a video: %+v %v", j, w.sonarr.calls)
+	}
+	if err := os.Remove(filepath.Join(folder, "stray.mkv")); err != nil {
+		t.Fatal(err)
+	}
+	if j := w.fix(t, f, doRemoveAll); j.State != "done" || !strings.Contains(j.Detail, "seerr") {
+		t.Fatalf("%+v", j)
+	}
+	if fmt.Sprint(w.sonarr.calls) != "[remove series and files 4]" || fmt.Sprint(w.seerr.deleted) != "[9]" {
+		t.Fatalf("%v %v", w.sonarr.calls, w.seerr.deleted)
 	}
 }

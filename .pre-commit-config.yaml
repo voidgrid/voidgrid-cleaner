@@ -7,7 +7,7 @@ repos:
     hooks:
       - id: gitleaks-system  # uses the installed gitleaks (Fedora package)
         pass_filenames: false  # upstream gitleaks-system omits this; filenames make gitleaks exit with usage
-  # Upstream's golangci-lint hooks build the linter with Go; this uses the installed one (Fedora package) instead.
+  # Upstream golangci-lint hooks build the linter with Go; the repo's own scripts/lint.sh runs the pinned one in Docker instead.
   - repo: local
     hooks:
       # Whole history before every push; the commit hook above only sees staged changes.
@@ -20,7 +20,7 @@ repos:
         stages: [pre-push]
       - id: golangci-lint
         name: golangci-lint
-        entry: golangci-lint run
+        entry: scripts/lint.sh  # pinned golangci-lint in Docker, same in every repo
         language: system
         types: [go]
         pass_filenames: false
