@@ -1499,6 +1499,27 @@ func TestBlockedDownloadAlertsAtOnce(t *testing.T) {
 	}
 }
 
+func TestFailedDownloadIsNotPostedToDiscord(t *testing.T) {
+	for name, q := range map[string]arr.QueueRecord{
+		"failed pending": {ID: 1, DownloadID: "X1", Title: "Show.S01E01", TrackedDownloadState: "failedPending", TrackedDownloadStatus: "error"},
+		"failed status":  {ID: 2, DownloadID: "X2", Title: "Show.S01E02", Status: "failed"},
+	} {
+		w := newWorld(t)
+		alerts := &fakeAlerts{}
+		w.d.Alerts = alerts
+		w.sonarr.queue = []arr.QueueRecord{q}
+		if err := w.d.CheckDownloads(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(alerts.posted) != 0 {
+			t.Fatalf("%s was posted: %q", name, alerts.posted)
+		}
+		if len(w.open(t, KindStuck)) != 1 {
+			t.Fatalf("%s: the downloads page should still list it", name)
+		}
+	}
+}
+
 func TestStuckDownloadAlertsOnceAfterAWhile(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -1676,6 +1697,10 @@ func TestRenameDetailShowsWhatChanges(t *testing.T) {
 	got := renameDetail(d)
 	if !strings.Contains(got, "U+0027") || !strings.Contains(got, "U+2019") {
 		t.Fatal(got)
+	}
+	d = fixData{OldName: "00026.m2ts", NewName: "Wrong Turn - (2021) - Bluray-1080p.m2ts"}
+	if got := renameDetail(d); strings.Contains(got, "U+") {
+		t.Fatal("a plain rename got a character note: " + got)
 	}
 	d = fixData{OldName: "a.mkv", NewName: "a.mkv", OldPath: "Season 1/a.mkv", NewPath: "Season 01/a.mkv"}
 	if got := renameDetail(d); !strings.Contains(got, "Season 01/a.mkv") || !strings.Contains(got, "folder or path") {

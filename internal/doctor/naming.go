@@ -70,6 +70,9 @@ func renameDetail(d fixData) string {
 	return s
 }
 
+// lookAlike is the most characters a change can span and still get a note.
+const lookAlike = 3
+
 // changeNote names what differs, so a swapped apostrophe or a moved folder
 // doesn't look like nothing. It's empty when there is no more to say.
 func changeNote(d fixData) string {
@@ -88,7 +91,13 @@ func changeNote(d fixData) string {
 	for suf < len(o)-pre && suf < len(n)-pre && o[len(o)-1-suf] == n[len(n)-1-suf] {
 		suf++
 	}
-	return "Changes " + quoteRunes(o[pre:len(o)-suf]) + " to " + quoteRunes(n[pre:len(n)-suf]) + "."
+	// A bigger change shows in the names themselves; this is for the ones that
+	// look the same, like a straight apostrophe turned curly.
+	from, to := o[pre:len(o)-suf], n[pre:len(n)-suf]
+	if len(from) > lookAlike || len(to) > lookAlike {
+		return ""
+	}
+	return "Changes " + quoteRunes(from) + " to " + quoteRunes(to) + "."
 }
 
 // quoteRunes shows text with its code points, since look-alikes are the point.

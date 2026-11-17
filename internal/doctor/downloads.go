@@ -18,8 +18,9 @@ import (
 const KindStuck = "stuck_download"
 
 // stuckFor is how long a download that could still sort itself out, such as
-// a stalled one, stays stuck before Discord hears about it. One blocked or
-// failed posts at once: it never clears on its own.
+// a stalled one, stays stuck before Discord hears about it. One blocked posts
+// at once: it never clears on its own. A failed one never posts: Radarr and
+// Sonarr handle it.
 const stuckFor = 15 * time.Minute
 
 // What can be done about a stuck download, named as Radarr and Sonarr name them.
@@ -48,11 +49,15 @@ func isStuck(q arr.QueueRecord) bool {
 		q.Status == "failed" || q.Status == "warning"
 }
 
-// isBlocked is a download that needs someone: Radarr or Sonarr won't import it,
-// or it failed.
+// isFailed is a download Radarr or Sonarr handles itself: it blocklists the
+// release and searches again. Discord isn't told about these (user, 2026-11-17).
+func isFailed(q arr.QueueRecord) bool {
+	return q.TrackedDownloadState == "failedPending" || q.TrackedDownloadState == "failed" || q.Status == "failed"
+}
+
+// isBlocked is a download that needs someone: Radarr or Sonarr won't import it.
 func isBlocked(q arr.QueueRecord) bool {
-	return q.TrackedDownloadState == "importBlocked" || q.TrackedDownloadState == "failedPending" ||
-		q.TrackedDownloadStatus == "error" || q.Status == "failed"
+	return !isFailed(q) && (q.TrackedDownloadState == "importBlocked" || q.TrackedDownloadStatus == "error")
 }
 
 func itemName(q arr.QueueRecord) string {
@@ -165,7 +170,7 @@ func (d *Doctor) CheckDownloads(ctx context.Context) error {
 			found = append(found, storage.Finding{
 				Subject: app + ":" + key, Title: name, Severity: problem,
 				Detail: "Stuck in " + app + ": " + reason + " Release: " + g[0].Title,
-				Data:   encode(fixData{App: app, DownloadID: g[0].DownloadID, QueueIDs: ids, OldName: g[0].Title, NewName: reason, Blocked: slices.ContainsFunc(g, isBlocked)}),
+				Data:   encode(fixData{App: app, DownloadID: g[0].DownloadID, QueueIDs: ids, OldName: g[0].Title, NewName: reason, Blocked: slices.ContainsFunc(g, isBlocked), Failed: !slices.ContainsFunc(g, func(q arr.QueueRecord) bool { return !isFailed(q) })}),
 			})
 		}
 	}
@@ -197,6 +202,9 @@ func (d *Doctor) alertStuck(ctx context.Context) error {
 		var data fixData
 		if err := jsonDecode(f.Data, &data); err != nil {
 			return err
+		}
+		if data.Failed {
+			continue // Radarr and Sonarr deal with failed downloads themselves
 		}
 		if !data.Blocked && d.now().Sub(time.Unix(f.FirstSeen, 0)) < stuckFor {
 			continue

@@ -49,6 +49,8 @@ type fixData struct {
 	QueueIDs   []int64 `json:"queue_ids,omitempty"`
 	// Blocked is a download that won't finish without someone acting.
 	Blocked bool `json:"blocked,omitempty"`
+	// Failed is a download Radarr or Sonarr handles itself, so Discord isn't told.
+	Failed bool `json:"failed,omitempty"`
 	// Resolution is what Plex measured, as Plex writes it.
 	Resolution string `json:"resolution,omitempty"`
 }
