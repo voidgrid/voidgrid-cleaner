@@ -22,6 +22,18 @@ func setDiscord(t *testing.T) {
 	t.Setenv("VGC_DISCORD_CHANNEL", "55")
 }
 
+func TestSeerrDBIsOptional(t *testing.T) {
+	setRequired(t)
+	setDiscord(t)
+	if c, err := Load(); err != nil || c.SeerrDBPath != "" {
+		t.Fatalf("unset: %q %v", c.SeerrDBPath, err)
+	}
+	t.Setenv("VGC_SEERR_DB", "/seerr/db.sqlite3")
+	if c, err := Load(); err != nil || c.SeerrDBPath != "/seerr/db.sqlite3" {
+		t.Fatalf("set: %q %v", c.SeerrDBPath, err)
+	}
+}
+
 func TestAdminChannel(t *testing.T) {
 	setRequired(t)
 	setDiscord(t)

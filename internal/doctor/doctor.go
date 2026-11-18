@@ -22,7 +22,6 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
-	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -135,11 +134,6 @@ type (
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)
 		DeleteMedia(context.Context, int64) error
-		RequestShow(ctx context.Context, tmdbID, userID int64, seasons []int) (seerr.Request, error)
-		RequestMovie(ctx context.Context, tmdbID, userID int64) (seerr.Request, error)
-		ApproveRequest(context.Context, int64) error
-		RequestByID(context.Context, int64) (seerr.Request, error)
-		MediaRecord(ctx context.Context, mediaType string, tmdbID int64) (id int64, requests int, found bool, err error)
 	}
 )
 
@@ -150,6 +144,8 @@ type Doctor struct {
 	Sonarr SonarrAPI
 	Plex   PlexAPI
 	Seerr  SeerrAPI
+	// SeerrDB records the requests assign makes, in Seerr's database; nil means assign is off.
+	SeerrDB RequestRecorder
 	// FixWait is the gap between checks that Plex took a match.
 	FixWait time.Duration
 	// DryRun makes a stray file fix report instead of deleting.

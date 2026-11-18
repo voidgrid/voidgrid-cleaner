@@ -275,19 +275,10 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 }
 
 type fakeSeerr struct {
-	requested           []string // what was asked for: "tv 5 user 2 [1 3]" or "movie 100 user 2"
-	approved            []int64
-	status              int // what a new request starts as; 0 means pending
-	approveErr          error
-	readBack            int  // the status a request has when read back
-	noRequest           bool // answer a request with success but make none, as Seerr does for a show that's all available
-	noRequestUntilReset bool // as noRequest, until the media is deleted
-	record              bool // Seerr has a record of the show
-	recordRequests      int  // how many requests that record holds
-	deleted             []int64
-	err                 error
-	noTitle             bool
-	titleErr            error
+	deleted  []int64
+	err      error
+	noTitle  bool
+	titleErr error
 }
 
 func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
@@ -298,38 +289,6 @@ func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
 		return "", &httpjson.StatusError{Service: "seerr", Code: http.StatusInternalServerError}
 	}
 	return "Gone Film", nil
-}
-
-func (f *fakeSeerr) request(what string, tmdb int64) (seerr.Request, error) {
-	f.requested = append(f.requested, what)
-	if f.noRequest || (f.noRequestUntilReset && len(f.deleted) == 0) {
-		return seerr.Request{}, nil
-	}
-	r := seerr.Request{ID: 90 + int64(len(f.requested)), Status: max(f.status, seerr.StatusPending)}
-	r.Media.ID, r.Media.TmdbID = 50+tmdb, tmdb
-	return r, nil
-}
-
-func (f *fakeSeerr) RequestShow(_ context.Context, tmdb, user int64, seasons []int) (seerr.Request, error) {
-	return f.request(fmt.Sprintf("tv %d user %d %v", tmdb, user, seasons), tmdb)
-}
-
-func (f *fakeSeerr) RequestMovie(_ context.Context, tmdb, user int64) (seerr.Request, error) {
-	return f.request(fmt.Sprintf("movie %d user %d", tmdb, user), tmdb)
-}
-
-func (f *fakeSeerr) ApproveRequest(_ context.Context, id int64) error {
-	f.approved = append(f.approved, id)
-	return f.approveErr
-}
-
-func (f *fakeSeerr) MediaRecord(context.Context, string, int64) (int64, int, bool, error) {
-	return 511, f.recordRequests, f.record, nil
-}
-
-// RequestByID answers with whatever status Seerr moved the request to on its own.
-func (f *fakeSeerr) RequestByID(_ context.Context, id int64) (seerr.Request, error) {
-	return seerr.Request{ID: id, Status: f.readBack}, nil
 }
 
 func (f *fakeSeerr) DeleteMedia(_ context.Context, id int64) error {
@@ -614,11 +573,34 @@ func TestNoRequester(t *testing.T) {
 	}
 }
 
-// assignWorld has a Plex library of two shows and two movies nobody requested, all matched
-// to a finding, and returns the findings by rating key.
-func assignWorld(t *testing.T) (*world, map[string]storage.Finding) {
+// fakeRecorder stands in for Seerr's database.
+type fakeRecorder struct {
+	recorded []string // "tv 5 user 2 [1 2]" or "movie 100 user 2"
+	err      error
+	status   int
+}
+
+func (f *fakeRecorder) RecordRequest(_ context.Context, mediaType string, tmdb, user int64, seasons []seerr.Season) (seerr.Request, error) {
+	if f.err != nil {
+		return seerr.Request{}, f.err
+	}
+	what := fmt.Sprintf("%s %d user %d", mediaType, tmdb, user)
+	if mediaType == "tv" {
+		what += fmt.Sprintf(" %v", seasons)
+	}
+	f.recorded = append(f.recorded, what)
+	r := seerr.Request{ID: 90 + int64(len(f.recorded)), Status: max(f.status, seerr.StatusApproved)}
+	r.Media.ID, r.Media.TmdbID = 50+tmdb, tmdb
+	return r, nil
+}
+
+// assignWorld has a Plex library of two shows and three movies nobody requested, and returns
+// the findings by rating key.
+func assignWorld(t *testing.T) (*world, *fakeRecorder, map[string]storage.Finding) {
 	t.Helper()
 	w := newWorld(t)
+	rec := &fakeRecorder{}
+	w.d.SeerrDB = rec
 	ctx := context.Background()
 	id := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
 	ms := []storage.Media{
@@ -652,18 +634,18 @@ func assignWorld(t *testing.T) (*world, map[string]storage.Finding) {
 	if len(out) != 5 {
 		t.Fatalf("%+v", out)
 	}
-	return w, out
+	return w, rec, out
 }
 
 func TestAssignRequesterShow(t *testing.T) {
-	w, fs := assignWorld(t)
+	w, rec, fs := assignWorld(t)
 	ctx := context.Background()
 	if err := w.d.AssignRequester(ctx, fs["20"], 2); err != nil {
 		t.Fatal(err)
 	}
-	// Only the seasons Sonarr has files for or monitors, then approved.
-	if fmt.Sprint(w.seerr.requested) != "[tv 5 user 2 [1 2]]" || fmt.Sprint(w.seerr.approved) != "[91]" {
-		t.Fatalf("%v %v", w.seerr.requested, w.seerr.approved)
+	// Only the seasons Sonarr has files for or monitors; season 1 has files, season 2 doesn't yet.
+	if fmt.Sprint(rec.recorded) != "[tv 5 user 2 [{1 true} {2 false}]]" {
+		t.Fatalf("%v", rec.recorded)
 	}
 	var user, status int
 	if err := w.d.DB.QueryRowContext(ctx, `SELECT seerr_user_id, status FROM requests WHERE rating_key = '20'`).Scan(&user, &status); err != nil || user != 2 || status != seerr.StatusApproved {
@@ -675,22 +657,26 @@ func TestAssignRequesterShow(t *testing.T) {
 	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil {
 		t.Fatal("a resolved finding can't be assigned again")
 	}
+	// Nothing reaches Sonarr or Radarr: assign only reads them.
+	if len(w.sonarr.calls) != 0 || len(w.radarr.calls) != 0 {
+		t.Fatalf("sonarr %v radarr %v", w.sonarr.calls, w.radarr.calls)
+	}
 }
 
 func TestAssignRequesterMovie(t *testing.T) {
-	w, fs := assignWorld(t)
-	ctx := context.Background()
-	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
+	w, rec, fs := assignWorld(t)
+	rec.status = seerr.StatusCompleted
+	if err := w.d.AssignRequester(context.Background(), fs["10"], 2); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(w.seerr.requested) != "[movie 100 user 2]" || fmt.Sprint(w.seerr.approved) != "[91]" {
-		t.Fatalf("%v %v", w.seerr.requested, w.seerr.approved)
+	if fmt.Sprint(rec.recorded) != "[movie 100 user 2]" {
+		t.Fatalf("%v", rec.recorded)
 	}
 }
 
 // Nothing may be requested for something Radarr or Sonarr doesn't already have or want.
 func TestAssignRequesterOnlyWhatExists(t *testing.T) {
-	w, fs := assignWorld(t)
+	w, rec, fs := assignWorld(t)
 	ctx := context.Background()
 	for _, key := range []string{"21", "11", "12"} { // not in Sonarr, not in Radarr, in Radarr but neither there nor monitored
 		if err := w.d.AssignRequester(ctx, fs[key], 2); !errors.Is(err, ErrNotAssignable) {
@@ -701,99 +687,41 @@ func TestAssignRequesterOnlyWhatExists(t *testing.T) {
 	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
 		t.Fatalf("a show with no season there or monitored: %v", err)
 	}
-	if len(w.seerr.requested) != 0 || len(w.seerr.approved) != 0 {
-		t.Fatalf("reached Seerr: %v %v", w.seerr.requested, w.seerr.approved)
+	if len(rec.recorded) != 0 {
+		t.Fatalf("recorded %v", rec.recorded)
 	}
 	if got := w.open(t, KindNoRequester); len(got) != 5 {
 		t.Fatalf("refused assigns must leave the findings open: %+v", got)
 	}
 }
 
-// Seerr answers success with no request for a show that's all available. That must not
-// be stored, resolve the finding, or be approved.
-func TestAssignRequesterNoRequestMade(t *testing.T) {
-	w, fs := assignWorld(t)
+// Seerr turns away a title it has no record of or that already holds a request; the app stores nothing then.
+func TestAssignRequesterSeerrRefuses(t *testing.T) {
+	w, rec, fs := assignWorld(t)
 	ctx := context.Background()
-	w.seerr.noRequest = true
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
-		t.Fatalf("%v", err)
+	for _, e := range []error{seerr.ErrNoMedia, seerr.ErrHasRequests} {
+		rec.err = e
+		if err := w.d.AssignRequester(ctx, fs["10"], 2); !errors.Is(err, ErrNotAssignable) {
+			t.Fatalf("%v: %v", e, err)
+		}
+	}
+	rec.err = errors.New("database is locked")
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err == nil || errors.Is(err, ErrNotAssignable) {
+		t.Fatalf("a failure isn't a refusal: %v", err)
 	}
 	var n int
-	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '20'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("stored a request that doesn't exist: %d %v", n, err)
-	}
-	if len(w.seerr.approved) != 0 || len(w.open(t, KindNoRequester)) != 5 {
-		t.Fatalf("approved %v, open %d", w.seerr.approved, len(w.open(t, KindNoRequester)))
-	}
-}
-
-// A show Seerr counts as available can only be requested from a clean record, which its media
-// delete gives. The delete happens only when the record holds no requests.
-func TestAssignRequesterResetsSeerrRecord(t *testing.T) {
-	w, fs := assignWorld(t)
-	ctx := context.Background()
-	w.seerr.noRequestUntilReset, w.seerr.record = true, true
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(w.seerr.deleted) != "[511]" || len(w.seerr.requested) != 2 || fmt.Sprint(w.seerr.approved) != "[92]" {
-		t.Fatalf("deleted %v requested %v approved %v", w.seerr.deleted, w.seerr.requested, w.seerr.approved)
-	}
-	var n int
-	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '20' AND seerr_request_id = 92`).Scan(&n); err != nil || n != 1 {
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '10'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("stored %d %v", n, err)
 	}
-}
-
-func TestAssignRequesterNeverDeletesARecordWithRequests(t *testing.T) {
-	w, fs := assignWorld(t)
-	ctx := context.Background()
-	w.seerr.noRequestUntilReset, w.seerr.record, w.seerr.recordRequests = true, true, 1
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
-		t.Fatalf("%v", err)
-	}
-	if len(w.seerr.deleted) != 0 || len(w.open(t, KindNoRequester)) != 5 {
-		t.Fatalf("deleted %v", w.seerr.deleted)
-	}
-	w.seerr.recordRequests, w.seerr.record = 0, false
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) || len(w.seerr.deleted) != 0 {
-		t.Fatalf("no record to reset: %v %v", err, w.seerr.deleted)
+	if got := w.open(t, KindNoRequester); len(got) != 5 {
+		t.Fatalf("findings must stay open: %+v", got)
 	}
 }
 
-func TestAssignRequesterApproval(t *testing.T) {
-	w, fs := assignWorld(t)
-	ctx := context.Background()
-	w.seerr.status = seerr.StatusApproved // the user's own permissions approved it
-	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil || len(w.seerr.approved) != 0 {
-		t.Fatalf("%v %v", err, w.seerr.approved)
-	}
-	w.seerr.status, w.seerr.approveErr = 0, errors.New("seerr down")
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil || !strings.Contains(err.Error(), "waits there") {
-		t.Fatalf("%v", err)
-	}
-	var status int
-	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '20'`).Scan(&status); err != nil || status != seerr.StatusPending {
-		t.Fatalf("an unapproved request is stored as pending: %d %v", status, err)
-	}
-}
-
-// Seerr completes a request itself when the media is already available, then answers 409 to approve.
-func TestAssignRequesterAlreadyCompleted(t *testing.T) {
-	w, fs := assignWorld(t)
-	ctx := context.Background()
-	w.seerr.approveErr = &httpjson.StatusError{Service: "seerr", Code: http.StatusConflict}
-	w.seerr.readBack = seerr.StatusCompleted
-	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
-		t.Fatalf("a request Seerr already completed is fine: %v", err)
-	}
-	var status int
-	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '10'`).Scan(&status); err != nil || status != seerr.StatusCompleted {
-		t.Fatalf("stored: %d %v", status, err)
-	}
-	// A 409 on a request that is still pending is a real refusal.
-	w.seerr.readBack = seerr.StatusPending
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil || !strings.Contains(err.Error(), "waits there") {
+func TestAssignRequesterNeedsSeerrDB(t *testing.T) {
+	w, _, fs := assignWorld(t)
+	w.d.SeerrDB = nil
+	if err := w.d.AssignRequester(context.Background(), fs["10"], 2); !errors.Is(err, ErrNotAssignable) {
 		t.Fatalf("%v", err)
 	}
 }

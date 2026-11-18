@@ -146,6 +146,14 @@ func run() error {
 		FixWait: 3 * time.Second,
 		DryRun:  worker.DryRun,
 	}
+	if cfg.SeerrDBPath != "" {
+		sdb, err := seerr.OpenDB(cfg.SeerrDBPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = sdb.Close() }()
+		checkup.SeerrDB = sdb
+	}
 	s.Previews = checkup
 	s.Assigner = checkup
 	s.Downloads = checkup

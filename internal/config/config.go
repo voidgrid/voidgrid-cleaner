@@ -31,6 +31,9 @@ type Config struct {
 	DiscordBotToken  string
 	DiscordPublicKey ed25519.PublicKey
 	DiscordChannel   string
+	// SeerrDBPath is Seerr's own SQLite file, mounted here to record requests for
+	// items nobody requested; optional, assign is off without it.
+	SeerrDBPath string
 	// DiscordAdminChannel takes tech alerts; optional.
 	DiscordAdminChannel string
 	DeleteLive          bool
@@ -66,6 +69,7 @@ func Load() (Config, error) {
 	if len(missing) > 0 {
 		return c, fmt.Errorf("config: required but not set: %s", strings.Join(missing, ", "))
 	}
+	c.SeerrDBPath = os.Getenv("VGC_SEERR_DB")
 	c.DiscordBotToken, c.DiscordChannel = os.Getenv("VGC_DISCORD_BOT_TOKEN"), os.Getenv("VGC_DISCORD_CHANNEL")
 	key := os.Getenv("VGC_DISCORD_PUBLIC_KEY")
 	if c.DiscordBotToken == "" != (key == "") || key == "" != (c.DiscordChannel == "") {

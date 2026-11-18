@@ -53,32 +53,6 @@ func fakeSeerr(t *testing.T, n int) *Client {
 			 "media":{"id":5,"mediaType":"tv","tmdbId":1399,"tvdbId":121361,"status":4,"ratingKey":"351","externalServiceId":17},
 			 "seasons":[{"id":1,"seasonNumber":1,"status":2},{"id":2,"seasonNumber":2,"status":2}]}]}`))
 	})
-	mux.HandleFunc("POST /api/v1/request", func(w http.ResponseWriter, r *http.Request) {
-		var b map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&b)
-		_, hasSeasons := b["seasons"]
-		tv := b["mediaType"] == "tv" && b["mediaId"] == float64(1399) && fmt.Sprint(b["seasons"]) == "[1 3]"
-		movie := b["mediaType"] == "movie" && b["mediaId"] == float64(603) && !hasSeasons
-		if r.Header.Get("X-Api-Key") != "key" || b["userId"] != float64(2) || tv == movie {
-			t.Errorf("request body: %v", b)
-		}
-		_, _ = w.Write([]byte(`{"id":77,"status":1,"media":{"id":9,"mediaType":"tv","tmdbId":1399,"tvdbId":121361}}`))
-	})
-	mux.HandleFunc("POST /api/v1/request/77/approve", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != "key" {
-			t.Errorf("approve without the key")
-		}
-		_, _ = w.Write([]byte(`{"id":77,"status":2}`))
-	})
-	mux.HandleFunc("GET /api/v1/request/77", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":77,"status":5}`))
-	})
-	mux.HandleFunc("GET /api/v1/tv/1399", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":1399,"name":"Show","mediaInfo":{"id":5,"requests":[{"id":11},{"id":12}]}}`))
-	})
-	mux.HandleFunc("GET /api/v1/tv/2000", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":2000,"name":"Unknown to Seerr"}`))
-	})
 	mux.HandleFunc("DELETE /api/v1/media/5", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Api-Key") != "key" {
 			w.WriteHeader(http.StatusForbidden)
@@ -121,37 +95,6 @@ func TestRequests(t *testing.T) {
 	if r.RequestedBy.ID != 2 || r.Media.ID != 5 || r.Media.MediaType != "tv" || *r.Media.RatingKey != "351" ||
 		*r.Media.ExternalServiceID != 17 || len(r.Seasons) != 2 || r.Seasons[1].SeasonNumber != 2 || r.CreatedAt.Month() != 10 {
 		t.Fatalf("parsed %+v", r)
-	}
-}
-
-func TestRequestShow(t *testing.T) {
-	c := fakeSeerr(t, 0)
-	r, err := c.RequestShow(context.Background(), 1399, 2, []int{1, 3})
-	if err != nil || r.ID != 77 || r.Status != StatusPending || r.Media.ID != 9 || *r.Media.TvdbID != 121361 {
-		t.Fatalf("%+v %v", r, err)
-	}
-	if _, err := c.RequestMovie(context.Background(), 603, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.ApproveRequest(context.Background(), 77); err != nil {
-		t.Fatal(err)
-	}
-	if r, err := c.RequestByID(context.Background(), 77); err != nil || r.Status != StatusCompleted {
-		t.Fatalf("%+v %v", r, err)
-	}
-	if err := c.ApproveRequest(context.Background(), 78); err == nil {
-		t.Fatal("unknown request should fail")
-	}
-}
-
-func TestMediaRecord(t *testing.T) {
-	c := fakeSeerr(t, 0)
-	id, n, found, err := c.MediaRecord(context.Background(), "tv", 1399)
-	if err != nil || !found || id != 5 || n != 2 {
-		t.Fatalf("%d %d %v %v", id, n, found, err)
-	}
-	if _, _, found, err := c.MediaRecord(context.Background(), "tv", 2000); err != nil || found {
-		t.Fatalf("a title Seerr has no record of: %v %v", found, err)
 	}
 }
 
