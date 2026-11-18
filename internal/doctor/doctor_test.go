@@ -563,6 +563,7 @@ func TestStaleRequest(t *testing.T) {
 
 func TestNoRequester(t *testing.T) {
 	w := newWorld(t)
+	w.d.SeerrDB = &fakeRecorder{}
 	ctx := context.Background()
 	secs := []storage.Section{{Key: "2", Title: "TV", Type: "show"}}
 	tmdb := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: n != 0} }
@@ -774,16 +775,23 @@ func TestAssignRequesterSeerrRefuses(t *testing.T) {
 	}
 }
 
-// Only shows need Seerr's database; movies don't.
-func TestAssignRequesterNeedsSeerrDBForShows(t *testing.T) {
+// Without Seerr's database mounted the whole feature is off: nothing is listed, old findings
+// are resolved, and assign refuses movies and shows alike.
+func TestNoRequesterOffWithoutSeerrDB(t *testing.T) {
 	w, _, fs := assignWorld(t)
 	w.d.SeerrDB = nil
 	ctx := context.Background()
-	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
-		t.Fatalf("%v", err)
+	for _, key := range []string{"10", "20"} {
+		if err := w.d.AssignRequester(ctx, fs[key], 2); !errors.Is(err, ErrNotAssignable) {
+			t.Fatalf("%s: %v", key, err)
+		}
 	}
-	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
-		t.Fatalf("a movie needs no database: %v", err)
+	w.run(t)
+	if got := w.open(t, KindNoRequester); len(got) != 0 {
+		t.Fatalf("still listed: %+v", got)
+	}
+	if len(w.seerr.requested) != 0 {
+		t.Fatalf("reached Seerr: %v", w.seerr.requested)
 	}
 }
 

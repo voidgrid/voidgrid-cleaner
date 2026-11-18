@@ -360,7 +360,13 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	save(all, KindSettings, s.settings)
 	tryFind(arrs, KindNaming, func() ([]storage.Finding, error) { return d.naming(ctx, &s) })
 	tryFind(all, KindStaleRequest, func() ([]storage.Finding, error) { return d.staleRequests(ctx, &s) })
-	tryFind(true, KindNoRequester, func() ([]storage.Finding, error) { return d.noRequester(ctx) })
+	// Only with Seerr's database mounted; without it the section stays empty, and an old
+	// one is resolved, so nothing about it shows.
+	if d.AssignEnabled() {
+		tryFind(true, KindNoRequester, func() ([]storage.Finding, error) { return d.noRequester(ctx) })
+	} else {
+		save(true, KindNoRequester, func() []storage.Finding { return nil })
+	}
 	tryFind(true, KindWatchDrift, func() ([]storage.Finding, error) { return d.watchDrift(ctx) })
 	return true
 }

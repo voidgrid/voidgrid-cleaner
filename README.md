@@ -45,7 +45,7 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 | `VGC_DISCORD_BOT_TOKEN` | for live deletion | | Discord bot token |
 | `VGC_DISCORD_PUBLIC_KEY` | for live deletion | | The Discord application's public key |
 | `VGC_DISCORD_CHANNEL` | for live deletion | | Channel ID for notifications |
-| `VGC_SEERR_DB` | no | | Path to Seerr's own SQLite file (`db.sqlite3`), mounted writable. Without it, **assign** on the doctor page refuses shows (movies still work) |
+| `VGC_SEERR_DB` | no | | Turns on the doctor's "movie or show with no requester" section and its **assign** button. Set it to the path of Seerr's own SQLite file (`db.sqlite3`) **only if that file's folder is mounted into this container, writable**: shows are recorded straight into it. Unset, the section isn't there at all |
 | `VGC_DISCORD_ADMIN_CHANNEL` | no | | Channel ID for tech alerts: the admin digest, unlinked Add me notices and stuck downloads with their buttons |
 | `VGC_DELETE_LIVE` | no | `false` | `true` really deletes; anything else is a dry run |
 | `TZ` | no | `UTC` | Time zone for times on screen and the delete window, e.g. `Etc/UTC` |

@@ -38,6 +38,10 @@ func assignSeasons(sr arr.Series) []seerr.Season {
 	return out
 }
 
+// AssignEnabled reports whether the no-requester section and assign are on, which
+// they are only when Seerr's database is mounted (VGC_SEERR_DB).
+func (d *Doctor) AssignEnabled() bool { return d.SeerrDB != nil }
+
 // AssignRequester gives a movie or show nobody requested a requester in Seerr,
 // for the user. It only lines Seerr up with what Radarr or Sonarr already has:
 // a movie must be on disk or monitored in Radarr, and a show's request names only
@@ -52,6 +56,9 @@ func assignSeasons(sr arr.Series) []seerr.Season {
 // title its scans haven't seen, and one that already holds a request is left
 // alone; both are refused.
 func (d *Doctor) AssignRequester(ctx context.Context, f storage.Finding, userID int64) error {
+	if d.SeerrDB == nil {
+		return fmt.Errorf("%w: assign is off, VGC_SEERR_DB isn't set", ErrNotAssignable)
+	}
 	// Read it again: it may have been assigned or dismissed since the caller looked.
 	f, found, err := d.DB.Finding(ctx, f.ID)
 	if err != nil {
@@ -152,9 +159,6 @@ func (d *Doctor) requestMovie(ctx context.Context, tmdb, userID int64) (seerr.Re
 // recordShow checks Sonarr has the show, then writes the request into Seerr's database.
 // It returns the TMDB ID it used, which Sonarr may know when Plex doesn't.
 func (d *Doctor) recordShow(ctx context.Context, tmdb, tvdb, userID int64) (int64, seerr.Request, error) {
-	if d.SeerrDB == nil {
-		return 0, seerr.Request{}, fmt.Errorf("%w: VGC_SEERR_DB isn't set, so a show's request can't be recorded in Seerr", ErrNotAssignable)
-	}
 	tmdb, seasons, err := d.showSeasons(ctx, tmdb, tvdb)
 	if err != nil {
 		return 0, seerr.Request{}, err
