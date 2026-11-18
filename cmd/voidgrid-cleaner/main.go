@@ -147,6 +147,7 @@ func run() error {
 		DryRun:  worker.DryRun,
 	}
 	s.Previews = checkup
+	s.Assigner = checkup
 	s.Downloads = checkup
 	s.Space = checkup
 	worker.Disks = checkup

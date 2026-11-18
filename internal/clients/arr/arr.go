@@ -212,6 +212,16 @@ type Series struct {
 		SizeOnDisk       int64 `json:"sizeOnDisk"`
 		EpisodeFileCount int   `json:"episodeFileCount"`
 	} `json:"statistics"`
+	Seasons []Season `json:"seasons"`
+}
+
+// Season is one season of a series as Sonarr tracks it.
+type Season struct {
+	SeasonNumber int  `json:"seasonNumber"`
+	Monitored    bool `json:"monitored"`
+	Statistics   struct {
+		EpisodeFileCount int `json:"episodeFileCount"`
+	} `json:"statistics"`
 }
 
 // EpisodeFile is a file Sonarr tracks.

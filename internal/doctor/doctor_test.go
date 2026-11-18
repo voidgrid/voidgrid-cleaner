@@ -17,6 +17,7 @@ import (
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -274,10 +275,14 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 }
 
 type fakeSeerr struct {
-	deleted  []int64
-	err      error
-	noTitle  bool
-	titleErr error
+	requested  []string // what was asked for: "tv 5 user 2 [1 3]" or "movie 100 user 2"
+	approved   []int64
+	status     int // what a new request starts as; 0 means pending
+	approveErr error
+	deleted    []int64
+	err        error
+	noTitle    bool
+	titleErr   error
 }
 
 func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
@@ -288,6 +293,26 @@ func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
 		return "", &httpjson.StatusError{Service: "seerr", Code: http.StatusInternalServerError}
 	}
 	return "Gone Film", nil
+}
+
+func (f *fakeSeerr) request(what string, tmdb int64) (seerr.Request, error) {
+	f.requested = append(f.requested, what)
+	r := seerr.Request{ID: 90 + int64(len(f.requested)), Status: max(f.status, seerr.StatusPending)}
+	r.Media.ID, r.Media.TmdbID = 50+tmdb, tmdb
+	return r, nil
+}
+
+func (f *fakeSeerr) RequestShow(_ context.Context, tmdb, user int64, seasons []int) (seerr.Request, error) {
+	return f.request(fmt.Sprintf("tv %d user %d %v", tmdb, user, seasons), tmdb)
+}
+
+func (f *fakeSeerr) RequestMovie(_ context.Context, tmdb, user int64) (seerr.Request, error) {
+	return f.request(fmt.Sprintf("movie %d user %d", tmdb, user), tmdb)
+}
+
+func (f *fakeSeerr) ApproveRequest(_ context.Context, id int64) error {
+	f.approved = append(f.approved, id)
+	return f.approveErr
 }
 
 func (f *fakeSeerr) DeleteMedia(_ context.Context, id int64) error {
@@ -535,6 +560,152 @@ func TestStaleRequest(t *testing.T) {
 	w.run(t)
 	if fs := w.open(t, KindStaleRequest); len(fs) != 1 || fs[0].Subject != "7" || fs[0].Title != "Gone Film" {
 		t.Fatalf("%+v", fs)
+	}
+}
+
+func TestNoRequester(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	secs := []storage.Section{{Key: "2", Title: "TV", Type: "show"}}
+	tmdb := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: n != 0} }
+	ms := []storage.Media{
+		{RatingKey: "20", SectionKey: "2", Type: "show", Title: "Requested", TmdbID: tmdb(1)},
+		{RatingKey: "21", SectionKey: "2", Type: "show", Title: "Nobody", Year: 2001, TmdbID: tmdb(2)},
+		{RatingKey: "22", SectionKey: "2", Type: "show", Title: "No ID"},
+		{RatingKey: "10", SectionKey: "2", Type: "movie", Title: "Film", TmdbID: tmdb(100)},
+	}
+	if err := w.d.DB.ReplaceLibrary(ctx, secs, ms); err != nil {
+		t.Fatal(err)
+	}
+	// No requests synced yet: nothing is saved, so nothing is flagged.
+	w.run(t)
+	if fs := w.open(t, KindNoRequester); len(fs) != 0 {
+		t.Fatalf("before any request is synced: %+v", fs)
+	}
+	if err := w.d.DB.ReplaceRequests(ctx, []storage.Request{
+		{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "tv", TmdbID: 1, RatingKey: sql.NullString{String: "20", Valid: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.run(t)
+	fs := w.open(t, KindNoRequester)
+	if len(fs) != 3 || fs[0].Subject != "10" || fs[1].Subject != "22" || fs[2].Subject != "21" || fs[2].Title != "Nobody (2001)" {
+		t.Fatalf("%+v", fs)
+	}
+	if !strings.Contains(fs[1].Detail, "no TMDB ID") || Fixable(KindNoRequester, "21") {
+		t.Fatalf("detail %q, fixable %v", fs[0].Detail, Fixable(KindNoRequester, "21"))
+	}
+}
+
+// assignWorld has a Plex library of two shows and two movies nobody requested, all matched
+// to a finding, and returns the findings by rating key.
+func assignWorld(t *testing.T) (*world, map[string]storage.Finding) {
+	t.Helper()
+	w := newWorld(t)
+	ctx := context.Background()
+	id := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
+	ms := []storage.Media{
+		{RatingKey: "20", SectionKey: "2", Type: "show", Title: "Show", TmdbID: id(5), TvdbID: id(55)},
+		{RatingKey: "21", SectionKey: "2", Type: "show", Title: "Not In Sonarr", TmdbID: id(6), TvdbID: id(66)},
+		{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "Film", TmdbID: id(100)},
+		{RatingKey: "11", SectionKey: "1", Type: "movie", Title: "Not In Radarr", TmdbID: id(101)},
+		{RatingKey: "12", SectionKey: "1", Type: "movie", Title: "Idle", TmdbID: id(102)},
+	}
+	secs := []storage.Section{{Key: "1", Title: "Movies", Type: "movie"}, {Key: "2", Title: "TV", Type: "show"}}
+	if err := w.d.DB.ReplaceLibrary(ctx, secs, ms); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.d.DB.ReplaceRequests(ctx, []storage.Request{{SeerrRequestID: 1, SeerrMediaID: 7, SeerrUserID: 1, MediaType: "tv", TmdbID: 9, RatingKey: sql.NullString{String: "99", Valid: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	season := func(n int, monitored bool, files int) arr.Season {
+		s := arr.Season{SeasonNumber: n, Monitored: monitored}
+		s.Statistics.EpisodeFileCount = files
+		return s
+	}
+	// Season 1 has files, 2 is monitored, 3 is neither, 0 (specials) is neither.
+	w.sonarr.series = []arr.Series{{ID: 3, Title: "Show", TvdbID: 55, TmdbID: 5, Seasons: []arr.Season{season(0, false, 0), season(1, false, 4), season(2, true, 0), season(3, false, 0)}}}
+	w.radarr.movies = append(w.radarr.movies,
+		arr.Movie{ID: 8, Title: "Idle", TmdbID: 102, HasFile: false, Monitored: false})
+	w.run(t)
+	out := map[string]storage.Finding{}
+	for _, f := range w.open(t, KindNoRequester) {
+		out[f.Subject] = f
+	}
+	if len(out) != 5 {
+		t.Fatalf("%+v", out)
+	}
+	return w, out
+}
+
+func TestAssignRequesterShow(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err != nil {
+		t.Fatal(err)
+	}
+	// Only the seasons Sonarr has files for or monitors, then approved.
+	if fmt.Sprint(w.seerr.requested) != "[tv 5 user 2 [1 2]]" || fmt.Sprint(w.seerr.approved) != "[91]" {
+		t.Fatalf("%v %v", w.seerr.requested, w.seerr.approved)
+	}
+	var user, status int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT seerr_user_id, status FROM requests WHERE rating_key = '20'`).Scan(&user, &status); err != nil || user != 2 || status != seerr.StatusApproved {
+		t.Fatalf("stored: %d %d %v", user, status, err)
+	}
+	if got := w.open(t, KindNoRequester); len(got) != 4 {
+		t.Fatalf("the assigned finding should resolve: %+v", got)
+	}
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil {
+		t.Fatal("a resolved finding can't be assigned again")
+	}
+}
+
+func TestAssignRequesterMovie(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(w.seerr.requested) != "[movie 100 user 2]" || fmt.Sprint(w.seerr.approved) != "[91]" {
+		t.Fatalf("%v %v", w.seerr.requested, w.seerr.approved)
+	}
+}
+
+// Nothing may be requested for something Radarr or Sonarr doesn't already have or want.
+func TestAssignRequesterOnlyWhatExists(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	for _, key := range []string{"21", "11", "12"} { // not in Sonarr, not in Radarr, in Radarr but neither there nor monitored
+		if err := w.d.AssignRequester(ctx, fs[key], 2); !errors.Is(err, ErrNotAssignable) {
+			t.Fatalf("%s: %v", key, err)
+		}
+	}
+	w.sonarr.series[0].Seasons = []arr.Season{{SeasonNumber: 1}}
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
+		t.Fatalf("a show with no season there or monitored: %v", err)
+	}
+	if len(w.seerr.requested) != 0 || len(w.seerr.approved) != 0 {
+		t.Fatalf("reached Seerr: %v %v", w.seerr.requested, w.seerr.approved)
+	}
+	if got := w.open(t, KindNoRequester); len(got) != 5 {
+		t.Fatalf("refused assigns must leave the findings open: %+v", got)
+	}
+}
+
+func TestAssignRequesterApproval(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.status = seerr.StatusApproved // the user's own permissions approved it
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil || len(w.seerr.approved) != 0 {
+		t.Fatalf("%v %v", err, w.seerr.approved)
+	}
+	w.seerr.status, w.seerr.approveErr = 0, errors.New("seerr down")
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil || !strings.Contains(err.Error(), "waits there") {
+		t.Fatalf("%v", err)
+	}
+	var status int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '20'`).Scan(&status); err != nil || status != seerr.StatusPending {
+		t.Fatalf("an unapproved request is stored as pending: %d %v", status, err)
 	}
 }
 

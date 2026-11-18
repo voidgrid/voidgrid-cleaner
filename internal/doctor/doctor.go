@@ -22,6 +22,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -44,6 +45,7 @@ const (
 	KindSettings        = "settings_drift"
 	KindWatchDrift      = "watch_drift"
 	KindNotManaged      = "not_managed"
+	KindNoRequester     = "no_requester"
 )
 
 // Labels names each kind, in the order the screen lists them.
@@ -60,6 +62,7 @@ var Labels = []struct{ Kind, Label string }{
 	{KindNotManaged, "not in radarr or sonarr"},
 	{KindHealth, "radarr and sonarr health"},
 	{KindStaleRequest, "stale seerr request"},
+	{KindNoRequester, "movie or show with no requester"},
 	{KindMissing, "missing"},
 	{KindNaming, "naming"},
 	{KindStrayFile, "stray file"},
@@ -132,6 +135,9 @@ type (
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)
 		DeleteMedia(context.Context, int64) error
+		RequestShow(ctx context.Context, tmdbID, userID int64, seasons []int) (seerr.Request, error)
+		RequestMovie(ctx context.Context, tmdbID, userID int64) (seerr.Request, error)
+		ApproveRequest(context.Context, int64) error
 	}
 )
 
@@ -352,6 +358,7 @@ func (d *Doctor) Run(ctx context.Context) bool {
 	save(all, KindSettings, s.settings)
 	tryFind(arrs, KindNaming, func() ([]storage.Finding, error) { return d.naming(ctx, &s) })
 	tryFind(all, KindStaleRequest, func() ([]storage.Finding, error) { return d.staleRequests(ctx, &s) })
+	tryFind(true, KindNoRequester, func() ([]storage.Finding, error) { return d.noRequester(ctx) })
 	tryFind(true, KindWatchDrift, func() ([]storage.Finding, error) { return d.watchDrift(ctx) })
 	return true
 }

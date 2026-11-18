@@ -1107,6 +1107,87 @@ func TestDoctorPreviewAndApply(t *testing.T) {
 	}
 }
 
+// fakeAssigner records what the web asked the doctor to assign.
+type fakeAssigner struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeAssigner) AssignRequester(_ context.Context, fi storage.Finding, user int64) error {
+	f.calls = append(f.calls, fi.Subject+" to "+strconv.FormatInt(user, 10))
+	return f.err
+}
+
+func TestAssignRequester(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	fa := &fakeAssigner{}
+	s.Assigner = fa
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.SaveFindings(ctx, doctor.KindNoRequester, []storage.Finding{
+		{Subject: "30", Title: "Show Thirty", Severity: "note"}, {Subject: "31", Title: "Movie", Severity: "note"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindHealth, []storage.Finding{{Subject: "h", Title: "Health", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveFindings(ctx, doctor.KindStaleRequest, []storage.Finding{{Subject: "9", Title: "Stale", Severity: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := s.DB.Findings(ctx, "open")
+	ids := map[string]string{}
+	for _, f := range fs {
+		ids[f.Title] = strconv.FormatInt(f.ID, 10)
+	}
+	b := body(t, get(t, c, app.URL+"/doctor"))
+	if !strings.Contains(b, "/doctor/"+ids["Show Thirty"]+"/assign") || !strings.Contains(b, `<option value="2">bob</option>`) ||
+		strings.Contains(b, "tick Show Thirty") || !strings.Contains(b, "tick Stale") {
+		t.Fatalf("doctor page: %s", b)
+	}
+	// A fix button on each row that can be fixed, none where assign is the action.
+	if !strings.Contains(b, `aria-label="fix Stale"`) || strings.Contains(b, `aria-label="fix Show Thirty"`) || strings.Contains(b, `aria-label="fix Health"`) {
+		t.Fatalf("fix buttons: %s", b)
+	}
+	assign := func(finding, user string) int {
+		return postForm(t, c, app.URL+"/doctor/"+finding+"/assign", url.Values{"user": {user}}).StatusCode
+	}
+	for name, got := range map[string]int{
+		"not a user":      assign(ids["Show Thirty"], "99"),
+		"no user":         assign(ids["Show Thirty"], ""),
+		"another kind":    assign(ids["Health"], "2"),
+		"unknown finding": assign("9999", "2"),
+	} {
+		if got < 400 {
+			t.Fatalf("%s: %d", name, got)
+		}
+	}
+	if len(fa.calls) != 0 {
+		t.Fatalf("a refused assign reached the doctor: %v", fa.calls)
+	}
+	if got := assign(ids["Show Thirty"], "2"); got != http.StatusSeeOther || fmt.Sprint(fa.calls) != "[30 to 2]" {
+		t.Fatalf("assign: %d %v", got, fa.calls)
+	}
+	fa.err = fmt.Errorf("%w: Sonarr doesn't have this show", doctor.ErrNotAssignable)
+	if got := assign(ids["Movie"], "2"); got != http.StatusUnprocessableEntity {
+		t.Fatalf("refused by the doctor: %d", got)
+	}
+	fa.err = errors.New("seerr down")
+	if got := assign(ids["Movie"], "2"); got != http.StatusBadGateway {
+		t.Fatalf("failed: %d", got)
+	}
+
+	app, c, s = newTestApp(t, 200) // bob, not an admin
+	seedLibrary(t, s)
+	s.Assigner = fa
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	if resp := postForm(t, c, app.URL+"/doctor/1/assign", url.Values{"user": {"2"}}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin assign: %d", resp.StatusCode)
+	}
+}
+
 func TestDoctorFixesAdminOnly(t *testing.T) {
 	app, c, s := newTestApp(t, 200) // bob, not an admin
 	seedLibrary(t, s)

@@ -64,6 +64,8 @@ type Server struct {
 	DoctorNow func()
 	// Previews says what doctor fixes would do.
 	Previews Previewer
+	// Assigner files requests for shows nobody requested.
+	Assigner Assigner
 	// Posters resizes Plex artwork; PosterCache holds the results on disk.
 	Posters PosterSource
 	// Episodes lists a show's episodes from Plex, for marking one by hand.
@@ -113,6 +115,11 @@ type Previewer interface {
 	Preview(context.Context, storage.Finding) (doctor.Preview, error)
 }
 
+// Assigner files and approves a request for a show nobody requested.
+type Assigner interface {
+	AssignRequester(ctx context.Context, f storage.Finding, userID int64) error
+}
+
 type doctorPage struct {
 	Groups         []findingGroup
 	Dismissed      bool
@@ -120,10 +127,12 @@ type doctorPage struct {
 	ShowFixes      bool // the fixes from the last 14 days, in place of the findings
 	Fixes          []storage.FixJob
 	Previews       []doctor.Preview
+	Users          []storage.User // who a movie or show with no requester can be assigned to
 }
 
 type findingGroup struct {
 	Label    string
+	Kind     string
 	Fixable  bool
 	Findings []storage.Finding
 }
@@ -331,6 +340,7 @@ func (s *Server) Router() http.Handler {
 			r.Get("/doctor/preview", s.doctorPreview)
 			r.Post("/doctor/apply", s.doctorApply)
 			r.Post("/doctor/dismiss", s.dismissFindings)
+			r.Post("/doctor/{id}/assign", s.assignRequester)
 			r.Post("/doctor/{id}/dismiss", s.setFinding("dismissed"))
 			r.Post("/doctor/{id}/open", s.setFinding("open"))
 			r.Get("/log", s.auditLog)
@@ -788,6 +798,13 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := &doctorPage{Dismissed: dismissed, DismissedCount: len(other), ShowFixes: showFixes, Fixes: fixes}
+	if !showFixes {
+		if p.Users, err = s.DB.Users(r.Context()); err != nil {
+			log.Printf("web: users: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
 	if showFixes {
 		render(w, http.StatusOK, "doctor", page{User: &u, Doctor: p})
 		return
@@ -802,7 +819,7 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, label := range labels {
-			g := findingGroup{Label: label}
+			g := findingGroup{Label: label, Kind: l.Kind}
 			for _, f := range fs {
 				if f.Kind != l.Kind || (l.Kind == doctor.KindNaming && l.Label+": "+doctor.NamingGroup(f) != label) {
 					continue
@@ -934,6 +951,62 @@ func (s *Server) setFinding(state string) http.HandlerFunc {
 		s.DB.Audit(r.Context(), userFrom(r.Context()).Name, "doctor finding "+state, chi.URLParam(r, "id"), "")
 		http.Redirect(w, r, "/doctor", http.StatusSeeOther)
 	}
+}
+
+// assignRequester has the doctor file and approve a Seerr request, in the
+// name of the user the admin picked, for a show nobody requested. The doctor
+// limits it to what Sonarr already has (see Doctor.AssignRequester).
+func (s *Server) assignRequester(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	userID, err := strconv.ParseInt(r.PostFormValue("user"), 10, 64)
+	if err != nil {
+		http.Error(w, "pick a user", http.StatusBadRequest)
+		return
+	}
+	f, found, err := s.DB.Finding(r.Context(), id)
+	if err != nil {
+		log.Printf("web: finding: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !found || f.Kind != doctor.KindNoRequester || f.State != "open" {
+		http.NotFound(w, r)
+		return
+	}
+	users, err := s.DB.Users(r.Context())
+	if err != nil {
+		log.Printf("web: users: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !slices.ContainsFunc(users, func(u storage.User) bool { return u.SeerrID == userID }) {
+		http.Error(w, "that's not a Seerr user", http.StatusBadRequest)
+		return
+	}
+	// Once Seerr has the request a closed browser mustn't stop the record of it.
+	ctx := context.WithoutCancel(r.Context())
+	who := userFrom(r.Context()).Name
+	if err := s.Assigner.AssignRequester(ctx, f, userID); err != nil {
+		log.Printf("web: assign requester: %v", err)
+		s.DB.Audit(ctx, who, "request assign failed", f.Title, err.Error())
+		code := http.StatusBadGateway
+		if errors.Is(err, doctor.ErrNotAssignable) {
+			code = http.StatusUnprocessableEntity
+		}
+		http.Error(w, err.Error(), code)
+		return
+	}
+	s.DB.Audit(ctx, who, "request assigned", f.Title, "to Seerr user "+strconv.FormatInt(userID, 10))
+	http.Redirect(w, r, "/doctor", http.StatusSeeOther)
 }
 
 const logPageSize = 100

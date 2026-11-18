@@ -124,6 +124,35 @@ func (c *Client) Requests(ctx context.Context) ([]Request, error) {
 	return pages[Request](ctx, c, "/api/v1/request?filter=all&")
 }
 
+// Request statuses.
+const (
+	StatusPending  = 1
+	StatusApproved = 2
+)
+
+// RequestShow files a request for the given seasons of a show on behalf of a
+// user. Seerr's API key acts as its admin, which may name any user. The
+// request starts pending unless that user's own permissions auto-approve it.
+func (c *Client) RequestShow(ctx context.Context, tmdbID, userID int64, seasons []int) (Request, error) {
+	var r Request
+	err := c.call(ctx, http.MethodPost, "/api/v1/request", true,
+		map[string]any{"mediaType": "tv", "mediaId": tmdbID, "seasons": seasons, "userId": userID}, &r)
+	return r, err
+}
+
+// RequestMovie files a request for a movie on behalf of a user; see RequestShow.
+func (c *Client) RequestMovie(ctx context.Context, tmdbID, userID int64) (Request, error) {
+	var r Request
+	err := c.call(ctx, http.MethodPost, "/api/v1/request", true,
+		map[string]any{"mediaType": "movie", "mediaId": tmdbID, "userId": userID}, &r)
+	return r, err
+}
+
+// ApproveRequest approves a pending request, which makes Seerr act on it.
+func (c *Client) ApproveRequest(ctx context.Context, id int64) error {
+	return c.call(ctx, http.MethodPost, "/api/v1/request/"+strconv.FormatInt(id, 10)+"/approve", true, nil, nil)
+}
+
 // DeleteMedia removes Seerr's media record and the requests on it, so the
 // title shows as not requested and can be requested again later. It
 // deletes no files; Radarr/Sonarr do that.

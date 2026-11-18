@@ -150,7 +150,7 @@ fix is a metadata refresh, not a rematch. Radarr and Sonarr issues can be fixed 
 an untracked folder (unmonitored, with no search, so nothing downloads) or, for a show folder with no video in it, removing it
 instead, importing a file Radarr won't accept with a quality you
 pick, and stopping Radarr leaving empty folders. On managed paths it can also remove empty folders and delete stray files, and it
-can clear stale Seerr requests. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie TMDb
+can clear stale Seerr requests. Movies and shows nobody requested have no checkbox: pick a Seerr user from the list and press **assign** to file the request in their name and approve it. It only covers what Radarr or Sonarr already have: a movie on disk or monitored, and a show's seasons with files or monitored; anything else is refused and nothing is added. Rows that can be fixed also have a **fix** button for that one entry. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie TMDb
 removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix and removing a show folder only report what they would delete. Every other fix is real whatever that setting says. Tick them and press **preview** to see exactly what would change; nothing
 happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
 deleted.

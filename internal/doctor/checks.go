@@ -624,6 +624,28 @@ func (d *Doctor) staleRequests(ctx context.Context, s *snapshot) ([]storage.Find
 	return out, nil
 }
 
+// noRequester lists movies and shows nobody requested. They aren't fixed by ticking: an
+// admin picks a Seerr user for each on the screen (web.assignRequester).
+// While no requests are synced the check saves nothing.
+func (d *Doctor) noRequester(ctx context.Context) ([]storage.Finding, error) {
+	shows, err := d.DB.ItemsWithoutRequester(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.Finding, 0, len(shows))
+	for _, sh := range shows {
+		title, detail := sh.Title, "No Seerr request matches this "+sh.Type+"."
+		if sh.Year != 0 {
+			title = fmt.Sprintf("%s (%d)", sh.Title, sh.Year)
+		}
+		if !sh.TmdbID.Valid {
+			detail += " It has no TMDB ID, so it can't be requested."
+		}
+		out = append(out, storage.Finding{Subject: sh.RatingKey, Title: title, Severity: note, Detail: detail})
+	}
+	return out, nil
+}
+
 // watchDrift flags the two play histories drifting apart by more than a
 // little, which they do normally because they count a view differently.
 func (d *Doctor) watchDrift(ctx context.Context) ([]storage.Finding, error) {
