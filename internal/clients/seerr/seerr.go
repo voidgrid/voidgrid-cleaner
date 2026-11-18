@@ -126,9 +126,32 @@ func (c *Client) Requests(ctx context.Context) ([]Request, error) {
 
 // Request statuses.
 const (
+	StatusPending   = 1
 	StatusApproved  = 2
 	StatusCompleted = 5 // approved and already available
 )
+
+// RequestMovie files a request for a movie on behalf of a user. Seerr's API
+// key acts as its admin, which may name any user. For a movie already on disk
+// Seerr completes the request itself and nothing reaches Radarr.
+func (c *Client) RequestMovie(ctx context.Context, tmdbID, userID int64) (Request, error) {
+	var r Request
+	err := c.call(ctx, http.MethodPost, "/api/v1/request", true,
+		map[string]any{"mediaType": "movie", "mediaId": tmdbID, "userId": userID}, &r)
+	return r, err
+}
+
+// ApproveRequest approves a pending request, which makes Seerr act on it.
+func (c *Client) ApproveRequest(ctx context.Context, id int64) error {
+	return c.call(ctx, http.MethodPost, "/api/v1/request/"+strconv.FormatInt(id, 10)+"/approve", true, nil, nil)
+}
+
+// RequestByID reads one request.
+func (c *Client) RequestByID(ctx context.Context, id int64) (Request, error) {
+	var r Request
+	err := c.call(ctx, http.MethodGet, "/api/v1/request/"+strconv.FormatInt(id, 10), true, nil, &r)
+	return r, err
+}
 
 // DeleteMedia removes Seerr's media record and the requests on it, so the
 // title shows as not requested and can be requested again later. It

@@ -22,6 +22,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/plex"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
 
@@ -134,6 +135,9 @@ type (
 	SeerrAPI interface {
 		Title(context.Context, string, int64) (string, error)
 		DeleteMedia(context.Context, int64) error
+		RequestMovie(ctx context.Context, tmdbID, userID int64) (seerr.Request, error)
+		ApproveRequest(context.Context, int64) error
+		RequestByID(context.Context, int64) (seerr.Request, error)
 	}
 )
 

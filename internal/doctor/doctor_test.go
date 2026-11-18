@@ -275,10 +275,32 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 }
 
 type fakeSeerr struct {
-	deleted  []int64
-	err      error
-	noTitle  bool
-	titleErr error
+	requested  []string // movie requests made through the API: "movie 100 user 2"
+	approved   []int64
+	status     int // what a new request starts as; 0 means pending
+	approveErr error
+	readBack   int // the status a request has when read back
+	deleted    []int64
+	err        error
+	noTitle    bool
+	titleErr   error
+}
+
+func (f *fakeSeerr) RequestMovie(_ context.Context, tmdb, user int64) (seerr.Request, error) {
+	f.requested = append(f.requested, fmt.Sprintf("movie %d user %d", tmdb, user))
+	r := seerr.Request{ID: 90 + int64(len(f.requested)), Status: max(f.status, seerr.StatusPending)}
+	r.Media.ID, r.Media.TmdbID = 50+tmdb, tmdb
+	return r, nil
+}
+
+func (f *fakeSeerr) ApproveRequest(_ context.Context, id int64) error {
+	f.approved = append(f.approved, id)
+	return f.approveErr
+}
+
+// RequestByID answers with whatever status Seerr moved the request to on its own.
+func (f *fakeSeerr) RequestByID(_ context.Context, id int64) (seerr.Request, error) {
+	return seerr.Request{ID: id, Status: f.readBack}, nil
 }
 
 func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
@@ -657,20 +679,54 @@ func TestAssignRequesterShow(t *testing.T) {
 	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil {
 		t.Fatal("a resolved finding can't be assigned again")
 	}
-	// Nothing reaches Sonarr or Radarr: assign only reads them.
-	if len(w.sonarr.calls) != 0 || len(w.radarr.calls) != 0 {
-		t.Fatalf("sonarr %v radarr %v", w.sonarr.calls, w.radarr.calls)
+	// Nothing reaches Sonarr or Radarr, and Seerr's request API isn't used: assign only reads them.
+	if len(w.sonarr.calls) != 0 || len(w.radarr.calls) != 0 || len(w.seerr.requested) != 0 || len(w.seerr.approved) != 0 {
+		t.Fatalf("sonarr %v radarr %v seerr %v %v", w.sonarr.calls, w.radarr.calls, w.seerr.requested, w.seerr.approved)
 	}
 }
 
+// A movie goes through Seerr's request API and is approved there; Seerr's database isn't written.
 func TestAssignRequesterMovie(t *testing.T) {
 	w, rec, fs := assignWorld(t)
-	rec.status = seerr.StatusCompleted
-	if err := w.d.AssignRequester(context.Background(), fs["10"], 2); err != nil {
+	ctx := context.Background()
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(rec.recorded) != "[movie 100 user 2]" {
-		t.Fatalf("%v", rec.recorded)
+	if fmt.Sprint(w.seerr.requested) != "[movie 100 user 2]" || fmt.Sprint(w.seerr.approved) != "[91]" || len(rec.recorded) != 0 {
+		t.Fatalf("requested %v approved %v recorded %v", w.seerr.requested, w.seerr.approved, rec.recorded)
+	}
+	var status int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '10'`).Scan(&status); err != nil || status != seerr.StatusApproved {
+		t.Fatalf("stored %d %v", status, err)
+	}
+	// A user whose own permissions approve it needs no approval call.
+	w.seerr.status = seerr.StatusApproved
+	w.seerr.approved = nil
+	w.sonarr.series[0].Seasons = nil
+	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 9, Title: "Other", TmdbID: 101, HasFile: true})
+	if err := w.d.AssignRequester(ctx, fs["11"], 2); err != nil || len(w.seerr.approved) != 0 {
+		t.Fatalf("%v %v", err, w.seerr.approved)
+	}
+}
+
+// Seerr completes a request itself for a movie that's already there, then answers 409 to approve.
+func TestAssignRequesterMovieAlreadyCompleted(t *testing.T) {
+	w, _, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.approveErr = &httpjson.StatusError{Service: "seerr", Code: http.StatusConflict}
+	w.seerr.readBack = seerr.StatusCompleted
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
+		t.Fatalf("a request Seerr already completed is fine: %v", err)
+	}
+	var status int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '10'`).Scan(&status); err != nil || status != seerr.StatusCompleted {
+		t.Fatalf("stored: %d %v", status, err)
+	}
+	// A 409 on a request that is still pending is a real refusal; it waits in Seerr.
+	w.seerr.readBack = seerr.StatusPending
+	w.radarr.movies = append(w.radarr.movies, arr.Movie{ID: 9, Title: "Other", TmdbID: 101, HasFile: true})
+	if err := w.d.AssignRequester(ctx, fs["11"], 2); err == nil || !strings.Contains(err.Error(), "waits there") {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -701,16 +757,16 @@ func TestAssignRequesterSeerrRefuses(t *testing.T) {
 	ctx := context.Background()
 	for _, e := range []error{seerr.ErrNoMedia, seerr.ErrHasRequests} {
 		rec.err = e
-		if err := w.d.AssignRequester(ctx, fs["10"], 2); !errors.Is(err, ErrNotAssignable) {
+		if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
 			t.Fatalf("%v: %v", e, err)
 		}
 	}
 	rec.err = errors.New("database is locked")
-	if err := w.d.AssignRequester(ctx, fs["10"], 2); err == nil || errors.Is(err, ErrNotAssignable) {
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil || errors.Is(err, ErrNotAssignable) {
 		t.Fatalf("a failure isn't a refusal: %v", err)
 	}
 	var n int
-	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '10'`).Scan(&n); err != nil || n != 0 {
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '20'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("stored %d %v", n, err)
 	}
 	if got := w.open(t, KindNoRequester); len(got) != 5 {
@@ -718,11 +774,16 @@ func TestAssignRequesterSeerrRefuses(t *testing.T) {
 	}
 }
 
-func TestAssignRequesterNeedsSeerrDB(t *testing.T) {
+// Only shows need Seerr's database; movies don't.
+func TestAssignRequesterNeedsSeerrDBForShows(t *testing.T) {
 	w, _, fs := assignWorld(t)
 	w.d.SeerrDB = nil
-	if err := w.d.AssignRequester(context.Background(), fs["10"], 2); !errors.Is(err, ErrNotAssignable) {
+	ctx := context.Background()
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
 		t.Fatalf("%v", err)
+	}
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
+		t.Fatalf("a movie needs no database: %v", err)
 	}
 }
 
