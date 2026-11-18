@@ -119,6 +119,7 @@ func run() error {
 		Posters:     &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
 		PosterCache: posters,
 		Episodes:    &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
+		Tags:        &plex.Server{BaseURL: cfg.PlexURL, Token: cfg.PlexToken, HTTP: hc},
 	}
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

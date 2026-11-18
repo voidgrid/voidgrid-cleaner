@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -29,6 +30,30 @@ type fakes struct {
 	views     []plex.View
 	failViews bool
 	showPaths map[string]string
+	labels    map[string][]plex.Label      // by library
+	labelled  map[string][]string          // label key to rating keys
+	colls     map[string][]plex.Collection // by library
+	collItems map[string][]string          // collection key to rating keys
+	failTags  bool
+}
+
+func (f *fakes) Labels(_ context.Context, sec string) ([]plex.Label, error) {
+	if f.failTags {
+		return nil, errors.New("plex labels down")
+	}
+	return f.labels[sec], nil
+}
+
+func (f *fakes) LabelItems(_ context.Context, _, key string) ([]string, error) {
+	return f.labelled[key], nil
+}
+
+func (f *fakes) Collections(_ context.Context, sec string) ([]plex.Collection, error) {
+	return f.colls[sec], nil
+}
+
+func (f *fakes) CollectionItems(_ context.Context, key string) ([]string, error) {
+	return f.collItems[key], nil
 }
 
 func (f *fakes) ShowPath(_ context.Context, key string) (string, error) { return f.showPaths[key], nil }
@@ -394,5 +419,55 @@ func TestFolderBeatsPlexIDWhenBothMatchRadarr(t *testing.T) {
 	var id, tmdb int64
 	if err := s.DB.QueryRow(`SELECT arr_id, tmdb_id FROM media WHERE rating_key = '10'`).Scan(&id, &tmdb); err != nil || id != 7 || tmdb != 100 {
 		t.Fatalf("linked to Radarr movie %d (tmdb %d) %v, want 7 (100)", id, tmdb, err)
+	}
+}
+
+func TestTagsAreCopiedPerLibraryAndKeptOnFailure(t *testing.T) {
+	s, f := setup(t)
+	ctx := context.Background()
+	f.labels = map[string][]plex.Label{
+		"1": {{Key: "5", Title: "watch-together"}, {Key: "6", Title: "Kometa"}},
+		"2": {{Key: "5", Title: "watch-together"}},
+		"3": {{Key: "9", Title: "music label"}}, // a music library is never handled
+	}
+	f.labelled = map[string][]string{"5": {"10", "20"}}
+	f.colls = map[string][]plex.Collection{"1": {{RatingKey: "500", Title: "Alien Collection", Count: 2}}}
+	f.collItems = map[string][]string{"500": {"10", "11"}}
+	if !s.Run(ctx) {
+		t.Fatal("run refused")
+	}
+	rows, err := s.DB.Labels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		got = append(got, r.SectionTitle+"/"+r.Title+"="+strconv.Itoa(r.Items))
+	}
+	// Libraries come in Plex's order; the label 5 is on item 10 in Films and 20 in TV.
+	want := []string{"TV/watch-together=1", "Films/Kometa=0", "Films/watch-together=1"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	cols, _ := s.DB.AllCollections(ctx)
+	members, _ := s.DB.ItemsInCollection(ctx, "500")
+	if len(cols) != 1 || cols[0].Title != "Alien Collection" || len(members) != 2 {
+		t.Fatalf("%+v %v", cols, members)
+	}
+	// Plex failing leaves the last good copy, and says so on the sync page.
+	f.failTags = true
+	s.Run(ctx)
+	if rows, _ := s.DB.Labels(ctx); len(rows) != 3 {
+		t.Fatalf("a failed sync dropped the copy: %+v", rows)
+	}
+	st, _ := s.DB.SyncStatuses(ctx)
+	var failed bool
+	for _, x := range st {
+		if x.Source == SrcTags && x.LastError != "" {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("the failure wasn't recorded: %+v", st)
 	}
 }

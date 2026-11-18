@@ -126,6 +126,48 @@ func TestMovieWatchedCount(t *testing.T) {
 	}
 }
 
+// The name beside a last-watched date is whoever made that play: their Seerr user if their Plex
+// account is linked to one, else the name on the play.
+func TestLastWatchedBy(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "Movies", Type: "movie"}}, []Media{
+		{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "m", AddedAt: 100},
+		{RatingKey: "11", SectionKey: "1", Type: "movie", Title: "never", AddedAt: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertUser(ctx, User{SeerrID: 1, Name: "Ann", PlexID: sql.NullInt64{Int64: 5, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	play := func(id, plexUser int64, name string, stopped int64) Play {
+		return Play{ReferenceID: id, PlexUserID: plexUser, UserName: name, MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: stopped}
+	}
+	by := func() map[string]string {
+		items, err := db.LibraryItems(ctx, User{IsAdmin: true}, "1", LibraryFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, it := range items {
+			out[it.RatingKey] = it.WatchedBy
+		}
+		return out
+	}
+	if err := db.UpsertPlays(ctx, []Play{play(1, 5, "annplex", 500), play(2, 6, "guestplex", 600)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := by(); got["10"] != "guestplex" || got["11"] != "" {
+		t.Fatalf("newest play is an unlinked account: %v", got)
+	}
+	if err := db.UpsertPlays(ctx, []Play{play(3, 5, "annplex", 700)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := by(); got["10"] != "Ann" {
+		t.Fatalf("a linked account shows its Seerr user: %v", got)
+	}
+}
+
 func TestLibraryOwnership(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
@@ -265,6 +307,85 @@ func TestLibrarySearchAndSort(t *testing.T) {
 	}
 }
 
+// The people filters: who requested it, who watched it, whether the requester did, and how big it is.
+func TestLibraryPeopleAndSizeFilters(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	gib := int64(1 << 30)
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "Movies", Type: "movie"}}, []Media{
+		{RatingKey: "A", SectionKey: "1", Type: "movie", Title: "a", SizeBytes: 5 * gib, AddedAt: 100},
+		{RatingKey: "B", SectionKey: "1", Type: "movie", Title: "b", SizeBytes: 1 * gib, AddedAt: 100},
+		{RatingKey: "C", SectionKey: "1", Type: "movie", Title: "c", SizeBytes: 0, AddedAt: 100},
+		{RatingKey: "D", SectionKey: "1", Type: "movie", Title: "d", SizeBytes: 2 * gib, AddedAt: 100},
+		{RatingKey: "E", SectionKey: "1", Type: "movie", Title: "e", SizeBytes: 10 * gib, AddedAt: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []User{
+		{SeerrID: 1, Name: "ann", PlexID: sql.NullInt64{Int64: 5, Valid: true}},
+		{SeerrID: 2, Name: "bob", PlexID: sql.NullInt64{Int64: 6, Valid: true}},
+	} {
+		if err := db.UpsertUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rk := func(k string) sql.NullString { return sql.NullString{String: k, Valid: true} }
+	if err := db.ReplaceRequests(ctx, []Request{
+		{SeerrRequestID: 1, SeerrUserID: 1, RatingKey: rk("A")},
+		{SeerrRequestID: 2, SeerrUserID: 1, RatingKey: rk("B")},
+		{SeerrRequestID: 3, SeerrUserID: 1, RatingKey: rk("C")},
+		{SeerrRequestID: 4, SeerrUserID: 2, RatingKey: rk("D")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	watch := func(id, plexUser int64, key string) Play {
+		return Play{ReferenceID: id, PlexUserID: plexUser, RatingKey: key, ShowRatingKey: key, Watched: true, Stopped: 1000}
+	}
+	if err := db.UpsertPlays(ctx, []Play{watch(1, 5, "A"), watch(2, 6, "B"), watch(3, 6, "E")}); err != nil {
+		t.Fatal(err)
+	}
+	admin := User{IsAdmin: true}
+	for name, c := range map[string]struct {
+		f    LibraryFilter
+		want string
+	}{
+		"requester watched":             {LibraryFilter{Requester: RequesterWatched}, "A"},
+		"requester hasn't":              {LibraryFilter{Requester: RequesterNot}, "B C D"}, // E has no requester, so it isn't here
+		"requester hasn't, others have": {LibraryFilter{Requester: RequesterOthers}, "B"},
+		"requested by ann":              {LibraryFilter{RequestedBy: 1}, "A B C"},
+		"requested by bob":              {LibraryFilter{RequestedBy: 2}, "D"},
+		"requested by nobody":           {LibraryFilter{RequestedBy: RequestedByNobody}, "E"},
+		"watched by bob":                {LibraryFilter{WatchedBy: 2}, "B E"},
+		"watched by ann":                {LibraryFilter{WatchedBy: 1}, "A"},
+		"not watched by bob":            {LibraryFilter{WatchedBy: 2, NotWatchedBy: true}, "A C D"},
+		"not watched by ann":            {LibraryFilter{WatchedBy: 1, NotWatchedBy: true}, "B C D E"},
+		"size 1.5":                      {LibraryFilter{MinSizeGB: 1.5}, "A D E"},
+		"size 5":                        {LibraryFilter{MinSizeGB: 5}, "A E"},
+		"size 0.5":                      {LibraryFilter{MinSizeGB: 0.5}, "A B D E"},
+		"people and size combine":       {LibraryFilter{RequestedBy: 1, WatchedBy: 2, NotWatchedBy: true, MinSizeGB: 1}, "A"},
+		"requester and watcher":         {LibraryFilter{Requester: RequesterNot, WatchedBy: 2}, "B"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			items, err := db.LibraryItems(ctx, admin, "1", c.f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, it := range items {
+				got = append(got, it.RatingKey)
+			}
+			if s := strings.Join(got, " "); s != c.want {
+				t.Fatalf("got %q, want %q", s, c.want)
+			}
+		})
+	}
+	// A user sees only what they requested, filters or not: ann's view of "watched by bob" is B alone.
+	items, err := db.LibraryItems(ctx, User{SeerrID: 1}, "1", LibraryFilter{WatchedBy: 2})
+	if err != nil || len(items) != 1 || items[0].RatingKey != "B" {
+		t.Fatalf("ann's items %+v %v", items, err)
+	}
+}
+
 func TestLibraryFiltersAndStatus(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
@@ -310,13 +431,18 @@ func TestLibraryFiltersAndStatus(t *testing.T) {
 		want string
 	}{
 		"added":                {LibraryFilter{AddedDays: 30}, "1 2 3"},
-		"unwatched":            {LibraryFilter{UnwatchedDays: 30}, "1 3 4"},
-		"requester watched":    {LibraryFilter{RequesterWatched: true}, "1"},
+		"unwatched":            {LibraryFilter{Unwatched: 30}, "1 3 4"},
+		"requester watched":    {LibraryFilter{Requester: RequesterWatched}, "1"},
+		"never watched":        {LibraryFilter{NeverWatched: true}, "3 4"},                     // 2 has a started play, which counts as a play
+		"unwatched 8 weeks":    {LibraryFilter{Unwatched: 8, UnwatchedUnit: UnitWeeks}, "3 4"}, // 1 was watched 50 days ago
+		"unwatched 7 weeks":    {LibraryFilter{Unwatched: 7, UnwatchedUnit: UnitWeeks}, "1 3 4"},
+		"unwatched 2 months":   {LibraryFilter{Unwatched: 2, UnwatchedUnit: UnitMonths}, "3 4"},
+		"unwatched 1 month":    {LibraryFilter{Unwatched: 1, UnwatchedUnit: UnitMonths}, "1 3 4"},
 		"status":               {LibraryFilter{Status: StatusKeep}, "3"},
 		"normal":               {LibraryFilter{Status: StatusNormal}, "1 2"},
 		"unknown status":       {LibraryFilter{Status: "x"}, "1 2 3 4"},
-		"filters combine":      {LibraryFilter{AddedDays: 30, UnwatchedDays: 30}, "1 3"},
-		"all of them combined": {LibraryFilter{AddedDays: 30, UnwatchedDays: 30, RequesterWatched: true, Status: StatusNormal}, "1"},
+		"filters combine":      {LibraryFilter{AddedDays: 30, Unwatched: 30}, "1 3"},
+		"all of them combined": {LibraryFilter{AddedDays: 30, Unwatched: 30, Requester: RequesterWatched, Status: StatusNormal}, "1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			items, err := db.LibraryItems(ctx, admin, "1", c.f)
@@ -384,7 +510,7 @@ func TestPlexAccountLinks(t *testing.T) {
 	admin := User{IsAdmin: true}
 	watched := func() int {
 		t.Helper()
-		items, err := db.LibraryItems(ctx, admin, "1", LibraryFilter{RequesterWatched: true})
+		items, err := db.LibraryItems(ctx, admin, "1", LibraryFilter{Requester: RequesterWatched})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -477,7 +603,7 @@ func TestManyPlexAccountsOneUser(t *testing.T) {
 			t.Fatal(id, found, err)
 		}
 	}
-	items, err := db.LibraryItems(ctx, User{IsAdmin: true}, "1", LibraryFilter{RequesterWatched: true})
+	items, err := db.LibraryItems(ctx, User{IsAdmin: true}, "1", LibraryFilter{Requester: RequesterWatched})
 	if err != nil || len(items) != 3 {
 		t.Fatalf("%+v %v", items, err)
 	}
@@ -606,7 +732,7 @@ func TestPlaysBeforeARedAddDontCount(t *testing.T) {
 	if err != nil || items[0].LastWatched != 0 {
 		t.Fatalf("%+v %v", items, err)
 	}
-	if got, _ := db.LibraryItems(ctx, admin, "2", LibraryFilter{RequesterWatched: true}); len(got) != 0 {
+	if got, _ := db.LibraryItems(ctx, admin, "2", LibraryFilter{Requester: RequesterWatched}); len(got) != 0 {
 		t.Fatalf("old play counted as requester watched: %+v", got)
 	}
 	if eps, err := db.WatchedEpisodes(ctx, false); err != nil || len(eps) != 0 {

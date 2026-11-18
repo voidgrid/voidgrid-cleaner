@@ -1,0 +1,24 @@
+{{define "content"}}
+<h1>collections</h1>
+<p class="muted">Plex collections in each library. Deleting one removes only the collection: every movie and show in it stays in the library. Plex can make the automatic "... Collection" ones again at a rescan if the library's collection setting is on.</p>
+{{if not .CollectionRows}}
+<p class="muted">no collections yet. They're copied from Plex at each sync.</p>
+{{else}}
+<table>
+    <thead><tr><th>library</th><th>collection</th><th>items</th><th>kind</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+    <tbody>
+    {{range .CollectionRows}}
+    <tr>
+        <td>{{.SectionTitle}}</td>
+        <td>{{.Title}}</td>
+        <td>{{if eq .Subtype "episode"}}{{.ItemCount}}{{else}}<a href="/library/{{.SectionKey}}?collection={{.Key}}">{{.ItemCount}}</a>{{end}}</td>
+        <td class="muted">{{if .Smart}}smart{{else if eq .Subtype "episode"}}episodes{{else}}{{.Subtype}}{{end}}</td>
+        <td><details class="confirm"><summary>delete</summary>
+            <form class="inline-form" method="post" action="/collections/{{.Key}}/delete"><button type="submit">delete {{.Title}}, keep its {{.ItemCount}} item{{if ne .ItemCount 1}}s{{end}}</button></form>
+        </details></td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
+{{end}}

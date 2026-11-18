@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 )
@@ -18,6 +19,9 @@ type Server struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	machineMu sync.Mutex
+	machineID string
 }
 
 // Section is a library. Type is "movie", "show", "artist" (music) or "photo".

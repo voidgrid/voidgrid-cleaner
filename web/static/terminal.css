@@ -269,6 +269,23 @@ details.filters {
     margin: 0 0 0.6rem;
 }
 
+/* A filter made of two controls, laid out like a label with one. */
+.filter-fields .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.filter-fields .inline-pair {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.filter-fields .inline-pair label.check {
+    margin: 0;
+}
+
 details.filters summary {
     cursor: pointer;
     color: var(--fg-bright);
@@ -437,4 +454,52 @@ img.poster {
     overflow: hidden;
     clip: rect(0 0 0 0);
     white-space: nowrap;
+}
+
+/* Ticking cards in the library, and the bar that acts on them. */
+ul.cards li {
+    position: relative;
+}
+
+.tick {
+    position: absolute;
+    top: 0.4rem;
+    left: 0.4rem;
+    z-index: 1;
+    display: block;
+    padding: 0.1rem 0.3rem;
+    background: var(--bg);
+    border: 1px solid var(--fg);
+}
+
+form.bulk {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    margin: 0.75rem 0;
+}
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0 0.3rem;
+    border: 1px solid var(--fg);
+}
+
+.chip button {
+    padding: 0 0.3rem;
+}
+
+details.confirm summary {
+    cursor: pointer;
+    color: var(--fg-bright);
 }

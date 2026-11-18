@@ -395,18 +395,81 @@ func TestMovieDetailShowsWatchedCount(t *testing.T) {
 	ctx := context.Background()
 	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
 	if err := s.DB.UpsertPlays(ctx, []storage.Play{
-		{ReferenceID: 1, PlexUserID: 5, MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700000000},
-		{ReferenceID: 2, PlexUserID: 6, MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700086400},
+		{ReferenceID: 1, PlexUserID: 5, UserName: "pat", MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700000000},
+		{ReferenceID: 2, PlexUserID: 6, UserName: "sam", MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700086400},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	b := body(t, get(t, c, app.URL+"/library/1"))
-	if !strings.Contains(b, "<dt>watched</dt><dd>2 times</dd>") || !strings.Contains(b, "<dt>last watched</dt><dd>2023-11-15</dd>") ||
+	if !strings.Contains(b, "<dt>watched</dt><dd>2 times</dd>") || !strings.Contains(b, "<dt>last watched</dt><dd>2023-11-15</dd>") || !strings.Contains(b, "<dt>watched by</dt><dd>sam</dd>") ||
 		!strings.Contains(b, "<dt>watched</dt><dd>never</dd>") {
 		t.Fatalf("movie detail: %s", b)
 	}
 	if b := body(t, get(t, c, app.URL+"/library/2")); strings.Contains(b, "<dt>watched</dt>") {
 		t.Fatalf("a show shows a watched count: %s", b)
+	}
+}
+
+// The library filters combine with sorting, the people filters are for admins, and the form keeps what was chosen.
+func TestLibraryFilterForm(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s) // movie 10 requested by bob, 11 by nobody
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.UpsertPlays(ctx, []storage.Play{
+		{ReferenceID: 1, PlexUserID: 5, UserName: "pat", MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: time.Now().Unix()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	titles := func(q string) (string, string) {
+		b := body(t, get(t, c, app.URL+"/library/1?"+q))
+		var got []string
+		for _, name := range []string{"Bobs Movie", "Unrequested"} {
+			if strings.Contains(b, `<span class="card-title">`+name+`</span>`) {
+				got = append(got, name)
+			}
+		}
+		return strings.Join(got, ", "), b
+	}
+	for q, want := range map[string]string{
+		"":                             "Bobs Movie, Unrequested",
+		"never=1":                      "Unrequested",
+		"by=none":                      "Unrequested",
+		"by=2":                         "Bobs Movie",
+		"requester=others":             "Bobs Movie", // an account linked to nobody watched it, bob never has
+		"requester=not":                "Bobs Movie",
+		"requester=1":                  "", // the old checkbox: the requester watched it
+		"size=1":                       "", // nothing in the seed has a size
+		"never=1&by=none&sort=watched": "Unrequested",
+		"never=1&by=2":                 "",
+	} {
+		if got, _ := titles(q); got != want {
+			t.Errorf("?%s: got %q, want %q", q, got, want)
+		}
+	}
+	// The form keeps what was chosen.
+	_, b := titles("unwatched=3&unit=months&never=1&requester=not&by=2&wb=1&wbnot=1&size=2.5&sort=newest")
+	for _, want := range []string{
+		`<option value="months" selected>`, `name="never" value="1" checked`, `<option value="not" selected>hasn't watched it`,
+		`<option value="2" selected>bob`, `<option value="1" selected>admin`, `name="wbnot" value="1" checked`,
+		`name="size" min="0" step="any" value="2.5"`, `<option value="newest" selected>`, `<details class="filters" open>`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("form lacks %q", want)
+		}
+	}
+	// An unknown unit means days.
+	if _, b := titles("unwatched=3&unit=fortnights"); !strings.Contains(b, `<option value="days" selected>`) {
+		t.Error("an unknown unit isn't days")
+	}
+	// Someone who isn't an admin gets no people filters, and their own view isn't narrowed by them.
+	app, c, s = newTestApp(t, 200) // bob
+	seedLibrary(t, s)
+	get(t, c, app.URL+"/login/plex")
+	get(t, c, app.URL+"/login/plex/callback")
+	b = body(t, get(t, c, app.URL+"/library/1?by=none&wb=1"))
+	if strings.Contains(b, `name="by"`) || strings.Contains(b, `name="wb"`) || !strings.Contains(b, `<span class="card-title">Bobs Movie</span>`) {
+		t.Fatalf("bob's library: %s", b)
 	}
 }
 

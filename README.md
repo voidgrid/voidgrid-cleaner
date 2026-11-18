@@ -110,8 +110,30 @@ move it.
 ### Statuses and filters
 
 Each item is normal, keep or space-based; shows can also be ephemeral. Admins
-set this in the item's details. Each library tab can filter by status, age,
-how long since anyone watched and whether a requester watched; filters combine.
+set this in the item's details. Each library tab can filter by status, age, size
+(at least N GB), never watched, how long since anyone watched (days, weeks or
+months) and whether a requester has watched it, hasn't, or hasn't while someone
+else has. Admins can also filter by who requested it (or nobody) and by who
+watched it, or didn't. Filters combine with each other and with the sort order.
+
+### Labels and collections
+
+Admins can see and change Plex labels (what Plex calls tags) and collections from the library.
+Tick cards, then use the bar above them to add or remove a label, put the ticked items in a
+collection or take them out, or put them in a new one; "tick all shown" ticks everything the
+current search and filters show, and labels and collections are filters too. An item's details
+list its labels and collections, each with a button to remove it, and a box to add a label. The
+**labels** page lists every label per library with how many items carry it and can remove one
+from all of them; the **collections** page lists every collection and can delete one, which
+removes only the collection: its movies and shows stay in the library.
+
+Changes go to Plex first and are copied here after, and the sync re-reads them from Plex, so a
+change made in Plex shows up at the next sync. Plex keeps a label's name after its last item
+loses it and has no call to delete the name, so an unused label stays in the list with a count of
+0. Smart collections build themselves from a filter, so items can't be added to or removed from
+them by hand, though they can be deleted. Label names can't hold a comma, and Plex matches
+them without regard to case. Removing a label doesn't remove overlay artwork already baked into
+posters by another tool.
 
 ### Plex accounts
 

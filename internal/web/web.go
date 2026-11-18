@@ -68,6 +68,8 @@ type Server struct {
 	Assigner Assigner
 	// Posters resizes Plex artwork; PosterCache holds the results on disk.
 	Posters PosterSource
+	// Tags changes Plex labels and collections; nil turns those pages' actions off.
+	Tags TagWriter
 	// Episodes lists a show's episodes from Plex, for marking one by hand.
 	Episodes    EpisodeSource
 	PosterCache *os.Root
@@ -93,6 +95,9 @@ type page struct {
 	Queue     []doctor.QueueRow
 	Admin     *adminPage
 	Episodes  *episodesPage
+	// LabelRows and CollectionRows are the labels and collections pages.
+	LabelRows      []storage.LabelRow
+	CollectionRows []storage.PlexCollection
 }
 
 type adminPage struct {
@@ -243,8 +248,12 @@ type libraryPage struct {
 	Current  storage.Section
 	Items    []storage.LibraryItem
 	Filter   storage.LibraryFilter
-	Total    int
-	More     string // URL of the next items, "" at the end
+	Users    []storage.User // admins only: who the requested-by and watched-by filters can pick
+	// LabelNames and Collections are this library's, for admins: the filters and the bulk bar.
+	LabelNames  []string
+	Collections []storage.PlexCollection
+	Total       int
+	More        string // URL of the next items, "" at the end
 }
 
 // libraryPageSize is how many cards a library page starts with: four rows.
@@ -285,7 +294,7 @@ func init() {
 		"fixable": doctor.Fixable,
 		"gb":      func(b int64) string { return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GB" },
 	}
-	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log", "downloads", "admin", "episodes"} {
+	for _, name := range []string{"login", "home", "sync", "library", "libraries", "users", "settings", "ephemeral", "doctor", "doctor-preview", "log", "downloads", "admin", "episodes", "labels", "collections"} {
 		pages[name] = template.Must(template.New("layout").Funcs(funcs).ParseFS(webassets.FS, "templates/layout.html", "templates/"+name+".html"))
 	}
 }
@@ -356,6 +365,13 @@ func (s *Server) Router() http.Handler {
 			r.Get("/library/item/{ratingKey}/episodes", s.episodes)
 			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/delete", s.markEpisode)
 			r.Post("/library/item/{ratingKey}/episodes/{episodeKey}/cancel", s.cancelEpisode)
+			r.Post("/library/{key}/bulk", s.bulk)
+			r.Get("/labels", s.labels)
+			r.Post("/labels/remove", s.removeLabelEverywhere)
+			r.Get("/collections", s.collections)
+			r.Post("/collections/{key}/delete", s.deleteCollection)
+			r.Post("/library/item/{ratingKey}/label", s.itemLabel)
+			r.Post("/library/item/{ratingKey}/collection/{collectionKey}/remove", s.itemCollectionRemove)
 			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
 			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion("cancel deletion", s.DB.CancelDeletion))
 			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion("postpone deletion", s.DB.PostponeDeletion))
@@ -643,8 +659,39 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	}
 	f := storage.LibraryFilter{
 		Search: strings.TrimSpace(v.Get("q")), Sort: v.Get("sort"), Status: v.Get("status"),
-		AddedDays: days("added"), UnwatchedDays: days("unwatched"), RequesterWatched: v.Get("requester") == "1",
+		AddedDays: days("added"), NeverWatched: v.Get("never") == "1",
 		Limit: libraryPageSize,
+	}
+	// How long "unwatched" looks back, in days, weeks or months; days if the unit is missing or unknown.
+	f.UnwatchedUnit = storage.UnitDays
+	maxUnwatched := 36500
+	switch v.Get("unit") {
+	case storage.UnitWeeks:
+		f.UnwatchedUnit, maxUnwatched = storage.UnitWeeks, 5200
+	case storage.UnitMonths:
+		f.UnwatchedUnit, maxUnwatched = storage.UnitMonths, 1200
+	}
+	f.Unwatched = min(days("unwatched"), maxUnwatched)
+	switch req := v.Get("requester"); req {
+	case storage.RequesterWatched, storage.RequesterNot, storage.RequesterOthers:
+		f.Requester = req
+	case "1":
+		f.Requester = storage.RequesterWatched // the old checkbox, in saved links
+	}
+	if n, err := strconv.ParseFloat(v.Get("size"), 64); err == nil && n > 0 {
+		f.MinSizeGB = min(n, 100000)
+	}
+	// Who requested and who watched are for admins: everyone else sees only their own requests.
+	if u.IsAdmin {
+		if v.Get("by") == "none" {
+			f.RequestedBy = storage.RequestedByNobody
+		} else if n, err := strconv.ParseInt(v.Get("by"), 10, 64); err == nil && n > 0 {
+			f.RequestedBy = n
+		}
+		if n, err := strconv.ParseInt(v.Get("wb"), 10, 64); err == nil && n > 0 {
+			f.WatchedBy, f.NotWatchedBy = n, v.Get("wbnot") == "1"
+		}
+		f.Label, f.Collection = strings.TrimSpace(v.Get("label")), v.Get("collection")
 	}
 	// The page script asks for everything it has loaded when it refreshes.
 	if n, err := strconv.Atoi(v.Get("limit")); err == nil && n > 0 {
@@ -660,6 +707,21 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lib := &libraryPage{Sections: secs, Current: secs[i], Items: items, Filter: f}
+	if u.IsAdmin {
+		if lib.Users, err = s.DB.Users(r.Context()); err != nil {
+			log.Printf("web: users: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if lib.LabelNames, err = s.DB.LabelNames(r.Context(), key); err == nil {
+			lib.Collections, err = s.DB.CollectionsIn(r.Context(), key)
+		}
+		if err != nil {
+			log.Printf("web: labels and collections: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
 	if len(items) > 0 {
 		lib.Total = items[0].Total
 	}

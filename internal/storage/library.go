@@ -326,15 +326,18 @@ func (db *DB) SyncReport(ctx context.Context, limit int) (counts map[string]int,
 // LibraryItem is one row of the library screen.
 type LibraryItem struct {
 	Media
-	Requesters  string // display names, comma-separated; "" if nobody requested it
-	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
-	Watched     int    // times a movie was watched by anyone; 0 for a show
-	Status      string // one of the Status constants
-	DeletionID  int64  // pending deletion, 0 if none
-	DeleteAfter int64  // its time, 0 until the notification is confirmed
-	KeptBy      string // who set the status from Discord, "" if it was set in the app
-	MyAsk       string // what the viewer asked for and is waiting on, \"\" if nothing
-	Total       int    // everything matching the filter, ignoring Limit
+	Requesters  string          // display names, comma-separated; "" if nobody requested it
+	LastWatched int64           // unix seconds of the newest play by anyone, 0 if never
+	WatchedBy   string          // who made that play, "" if never
+	Labels      []string        // Plex labels on it
+	Collections []CollectionRef // Plex collections it is in
+	Watched     int             // times a movie was watched by anyone; 0 for a show
+	Status      string          // one of the Status constants
+	DeletionID  int64           // pending deletion, 0 if none
+	DeleteAfter int64           // its time, 0 until the notification is confirmed
+	KeptBy      string          // who set the status from Discord, "" if it was set in the app
+	MyAsk       string          // what the viewer asked for and is waiting on, \"\" if nothing
+	Total       int             // everything matching the filter, ignoring Limit
 }
 
 // Item statuses. Ephemeral is for shows only.
@@ -353,13 +356,49 @@ func ValidStatus(s string) bool {
 // LibraryFilter narrows and orders a library. Zero values don't filter, and
 // every filter set must match.
 type LibraryFilter struct {
-	Search           string // title contains this
-	Sort             string // "newest" or "oldest" by date added to Plex (a show's date doesn't move when episodes arrive), "watched" by oldest last play, else title
-	Status           string // only this status
-	AddedDays        int    // added at least this many days ago
-	UnwatchedDays    int    // nobody watched it in this many days, never-watched included
-	RequesterWatched bool   // someone who requested it has watched it
-	Limit, Offset    int    // a window of the results; Limit 0 means all
+	Search        string  // title contains this
+	Sort          string  // "newest" or "oldest" by date added to Plex (a show's date doesn't move when episodes arrive), "watched" by oldest last play, else title
+	Status        string  // only this status
+	AddedDays     int     // added at least this many days ago
+	Unwatched     int     // nobody watched it in this long, never-watched included
+	UnwatchedUnit string  // UnitDays (also when empty), UnitWeeks or UnitMonths
+	NeverWatched  bool    // nobody ever watched it
+	Requester     string  // RequesterWatched, RequesterNot or RequesterOthers, "" for any
+	RequestedBy   int64   // a Seerr user ID who requested it, RequestedByNobody for items nobody requested, 0 for any
+	WatchedBy     int64   // a Seerr user ID whose Plex accounts watched it, 0 for any
+	NotWatchedBy  bool    // with WatchedBy: none of their accounts watched it
+	Label         string  // carries this Plex label, "" for any
+	Collection    string  // is in this Plex collection (its key), "" for any
+	MinSizeGB     float64 // at least this big, in GB (2^30 bytes), as the size shows; 0 for any
+	Limit, Offset int     // a window of the results; Limit 0 means all
+}
+
+// Units for the unwatched filter.
+const (
+	UnitDays   = "days"
+	UnitWeeks  = "weeks"
+	UnitMonths = "months"
+)
+
+// The requester filter: whether the people who requested an item have watched it.
+const (
+	RequesterWatched = "watched" // one of them has
+	RequesterNot     = "not"     // none has (and it has a requester)
+	RequesterOthers  = "others"  // none has, but someone else has
+)
+
+// RequestedByNobody picks items with no Seerr request.
+const RequestedByNobody = -1
+
+// unwatchedSince is how far back "unwatched" looks from now, as unix seconds.
+func (f LibraryFilter) unwatchedSince(now time.Time) int64 {
+	switch f.UnwatchedUnit {
+	case UnitMonths:
+		return now.AddDate(0, -f.Unwatched, 0).Unix()
+	case UnitWeeks:
+		return now.AddDate(0, 0, -7*f.Unwatched).Unix()
+	}
+	return now.AddDate(0, 0, -f.Unwatched).Unix()
 }
 
 // likeEscaper makes a search match its text literally in a LIKE pattern.
@@ -374,12 +413,30 @@ const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user
 // reattaches old history when something is added again, and a re-add starts clean.
 const lastWatched = `coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at), 0) AS last_watched`
 
+// lastWatchedBy selects who made the newest play, the one lastWatched dates: the
+// Seerr user their Plex account is linked to, else the name on the play, ” if never.
+const lastWatchedBy = `coalesce((SELECT coalesce(u.display_name, p.user_name) FROM plays p
+	LEFT JOIN ` + plexLinks + ` l ON l.plex_user_id = p.plex_user_id LEFT JOIN users u ON u.seerr_user_id = l.seerr_user_id
+	WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at
+	ORDER BY p.stopped DESC, p.reference_id DESC LIMIT 1), '') AS last_watched_by`
+
 // watchedCount selects how many times a movie was watched, 0 for a show or if never.
 // Plex and Tautulli both record the same views, so the two counts are never added: the
 // larger one stands, which also covers a view only one of them has. Plays from before the
 // item's added date don't count, as in lastWatched.
 const watchedCount = `CASE WHEN m.type = 'movie' THEN coalesce((SELECT max(sum(p.reference_id > 0), sum(p.reference_id < 0)) FROM plays p
 	WHERE p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at), 0) ELSE 0 END AS watched_count`
+
+// CollectionRef is a collection an item is in.
+type CollectionRef struct{ Key, Title string }
+
+// labelsOf and collectionsOf select an item's labels and collections, packed: names split by \x1f,
+// and each collection as key \x1e title.
+const (
+	labelsOf      = `coalesce((SELECT group_concat(label, char(31)) FROM (SELECT il.label FROM item_labels il WHERE il.rating_key = m.rating_key ORDER BY il.label COLLATE NOCASE)), '')`
+	collectionsOf = `coalesce((SELECT group_concat(key || char(30) || title, char(31)) FROM (SELECT c.key, c.title FROM item_collections ic
+	JOIN plex_collections c ON c.key = ic.collection_key WHERE ic.rating_key = m.rating_key ORDER BY c.title COLLATE NOCASE)), '')`
+)
 
 // byOldestWatched orders by lastWatched.
 const byOldestWatched = `last_watched = 0, last_watched, m.added_at, m.title COLLATE NOCASE`
@@ -418,7 +475,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 			coalesce((SELECT group_concat(name, ', ') FROM (
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
 				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
-			` + lastWatched + `, ` + watchedCount + `,
+			` + lastWatched + `, ` + lastWatchedBy + `, ` + watchedCount + `, ` + labelsOf + `, ` + collectionsOf + `,
 			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal'),
 			coalesce(d.id, 0), coalesce(d.delete_after, 0),
 			coalesce((SELECT coalesce(u.display_name, du.name) FROM item_status st
@@ -449,15 +506,55 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		q += ` AND m.added_at <= ?`
 		args = append(args, daysAgo(f.AddedDays))
 	}
-	if f.UnwatchedDays > 0 {
+	if f.Unwatched > 0 {
 		q += ` AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at AND p.stopped > ?)`
-		args = append(args, daysAgo(f.UnwatchedDays))
+		args = append(args, f.unwatchedSince(time.Now()))
 	}
-	if f.RequesterWatched {
-		q += ` AND EXISTS (SELECT 1 FROM plays p
+	if f.NeverWatched {
+		q += ` AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at)`
+	}
+	// A finished watch by a Plex account linked to one of the item's requesters.
+	const requesterWatched = `EXISTS (SELECT 1 FROM plays p
 			JOIN ` + plexLinks + ` l ON l.plex_user_id = p.plex_user_id
 			JOIN requests r ON r.seerr_user_id = l.seerr_user_id AND r.rating_key = m.rating_key
 			WHERE p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at)`
+	const hasRequester = `EXISTS (SELECT 1 FROM requests r WHERE r.rating_key = m.rating_key)`
+	const anyoneWatched = `EXISTS (SELECT 1 FROM plays p WHERE p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at)`
+	switch f.Requester {
+	case RequesterWatched:
+		q += ` AND ` + requesterWatched
+	case RequesterNot:
+		q += ` AND ` + hasRequester + ` AND NOT ` + requesterWatched
+	case RequesterOthers:
+		q += ` AND ` + hasRequester + ` AND NOT ` + requesterWatched + ` AND ` + anyoneWatched
+	}
+	switch {
+	case f.RequestedBy == RequestedByNobody:
+		q += ` AND NOT ` + hasRequester
+	case f.RequestedBy > 0:
+		q += ` AND EXISTS (SELECT 1 FROM requests r WHERE r.rating_key = m.rating_key AND r.seerr_user_id = ?)`
+		args = append(args, f.RequestedBy)
+	}
+	if f.WatchedBy > 0 {
+		not := ""
+		if f.NotWatchedBy {
+			not = "NOT "
+		}
+		q += ` AND ` + not + `EXISTS (SELECT 1 FROM plays p JOIN ` + plexLinks + ` l ON l.plex_user_id = p.plex_user_id
+			WHERE l.seerr_user_id = ? AND p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at)`
+		args = append(args, f.WatchedBy)
+	}
+	if f.Label != "" {
+		q += ` AND EXISTS (SELECT 1 FROM item_labels il WHERE il.rating_key = m.rating_key AND il.label = ?)`
+		args = append(args, f.Label)
+	}
+	if f.Collection != "" {
+		q += ` AND EXISTS (SELECT 1 FROM item_collections ic WHERE ic.rating_key = m.rating_key AND ic.collection_key = ?)`
+		args = append(args, f.Collection)
+	}
+	if f.MinSizeGB > 0 {
+		q += ` AND m.size_bytes >= ?`
+		args = append(args, int64(f.MinSizeGB*(1<<30)))
 	}
 	switch f.Sort {
 	case "newest":
@@ -482,10 +579,19 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 	var out []LibraryItem
 	for rows.Next() {
 		var it LibraryItem
+		var labels, colls string
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Watched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.MyAsk, &it.Total); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.WatchedBy, &it.Watched, &labels, &colls, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.MyAsk, &it.Total); err != nil {
 			return nil, err
+		}
+		if labels != "" {
+			it.Labels = strings.Split(labels, "\x1f")
+		}
+		for _, c := range strings.Split(colls, "\x1f") {
+			if key, title, ok := strings.Cut(c, "\x1e"); ok {
+				it.Collections = append(it.Collections, CollectionRef{Key: key, Title: title})
+			}
 		}
 		out = append(out, it)
 	}

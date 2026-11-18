@@ -17,7 +17,7 @@
         <option value="watched"{{if eq .Filter.Sort "watched"}} selected{{end}}>oldest watched</option>
     </select>
     <button type="submit">go</button>
-    {{$active := or .Filter.Status .Filter.AddedDays .Filter.UnwatchedDays .Filter.RequesterWatched}}
+    {{$active := or .Filter.Status .Filter.AddedDays .Filter.Unwatched .Filter.NeverWatched .Filter.Requester .Filter.RequestedBy .Filter.WatchedBy .Filter.MinSizeGB .Filter.Label .Filter.Collection}}
     {{if or .Filter.Search $active}}<a href="/library/{{.Current.Key}}">clear</a>{{end}}
     <details class="filters"{{if $active}} open{{end}}>
         <summary>filters</summary>
@@ -31,18 +31,92 @@
         <label>added at least (days ago)
             <input type="number" name="added" min="0" value="{{if .Filter.AddedDays}}{{.Filter.AddedDays}}{{end}}">
         </label>
-        <label>nobody watched in (days)
-            <input type="number" name="unwatched" min="0" value="{{if .Filter.UnwatchedDays}}{{.Filter.UnwatchedDays}}{{end}}">
+        <div class="field" role="group" aria-label="nobody watched in the last">
+            <span>nobody watched in the last</span>
+            <span class="inline-pair">
+            <input type="number" name="unwatched" min="0" value="{{if .Filter.Unwatched}}{{.Filter.Unwatched}}{{end}}" aria-label="how long">
+            <select name="unit" aria-label="unit of time">
+                <option value="days"{{if eq .Filter.UnwatchedUnit "days"}} selected{{end}}>days</option>
+                <option value="weeks"{{if eq .Filter.UnwatchedUnit "weeks"}} selected{{end}}>weeks</option>
+                <option value="months"{{if eq .Filter.UnwatchedUnit "months"}} selected{{end}}>months</option>
+            </select>
+            </span>
+        </div>
+        <label class="check"><input type="checkbox" name="never" value="1"{{if .Filter.NeverWatched}} checked{{end}}> never watched</label>
+        <label>requester
+            <select name="requester">
+                <option value="">any</option>
+                <option value="watched"{{if eq .Filter.Requester "watched"}} selected{{end}}>watched it</option>
+                <option value="not"{{if eq .Filter.Requester "not"}} selected{{end}}>hasn't watched it</option>
+                <option value="others"{{if eq .Filter.Requester "others"}} selected{{end}}>hasn't, but someone else has</option>
+            </select>
         </label>
-        <label class="check"><input type="checkbox" name="requester" value="1"{{if .Filter.RequesterWatched}} checked{{end}}> requester watched it</label>
+        {{if $.User.IsAdmin}}
+        <label>requested by
+            <select name="by">
+                <option value="">anyone</option>
+                <option value="none"{{if eq .Filter.RequestedBy -1}} selected{{end}}>nobody</option>
+                {{$by := .Filter.RequestedBy}}{{range .Users}}<option value="{{.SeerrID}}"{{if eq .SeerrID $by}} selected{{end}}>{{.Name}}</option>{{end}}
+            </select>
+        </label>
+        <div class="field" role="group" aria-label="watched by">
+            <span>watched by</span>
+            <span class="inline-pair">
+            <select name="wb" aria-label="watched by">
+                <option value="">anyone</option>
+                {{$wb := .Filter.WatchedBy}}{{range .Users}}<option value="{{.SeerrID}}"{{if eq .SeerrID $wb}} selected{{end}}>{{.Name}}</option>{{end}}
+            </select>
+            <label class="check"><input type="checkbox" name="wbnot" value="1"{{if .Filter.NotWatchedBy}} checked{{end}}> not</label>
+            </span>
+        </div>
+        {{end}}
+        {{if $.User.IsAdmin}}
+        <label>label
+            <select name="label">
+                <option value="">any</option>
+                {{$lab := .Filter.Label}}{{range .LabelNames}}<option value="{{.}}"{{if eq . $lab}} selected{{end}}>{{.}}</option>{{end}}
+            </select>
+        </label>
+        <label>collection
+            <select name="collection">
+                <option value="">any</option>
+                {{$col := .Filter.Collection}}{{range .Collections}}<option value="{{.Key}}"{{if eq .Key $col}} selected{{end}}>{{.Title}}</option>{{end}}
+            </select>
+        </label>
+        {{end}}
+        <label>at least (GB)
+            <input type="number" name="size" min="0" step="any" value="{{if .Filter.MinSizeGB}}{{.Filter.MinSizeGB}}{{end}}">
+        </label>
         </div>
     </details>
 </form>
 <p class="muted" id="count">{{.Total}} {{if eq .Current.Type "show"}}shows{{else}}movies{{end}}{{if not $.User.IsAdmin}} you requested{{end}}{{if .Filter.Search}} matching "{{.Filter.Search}}"{{end}}.</p>
+{{if $.User.IsAdmin}}
+<form id="bulk" class="bulk" method="post" action="/library/{{.Current.Key}}/bulk">
+    <span><span id="ticked">0</span> ticked</span>
+    <button type="button" data-tick-cards>tick all shown</button>
+    <select name="action" aria-label="what to do with the ticked items">
+        <option value="label-add">add label</option>
+        <option value="label-remove">remove label</option>
+        <option value="collection-add">add to collection</option>
+        <option value="collection-remove">remove from collection</option>
+        <option value="collection-new">put in a new collection</option>
+    </select>
+    <input name="label" list="library-labels" placeholder="label" aria-label="label">
+    <datalist id="library-labels">{{range .LabelNames}}<option value="{{.}}">{{end}}</datalist>
+    <select name="collection" aria-label="collection">
+        <option value="">collection</option>
+        {{range .Collections}}{{if not .Smart}}<option value="{{.Key}}">{{.Title}}</option>{{end}}{{end}}
+    </select>
+    <input name="title" placeholder="new collection name" aria-label="new collection name">
+    <button type="submit">apply to ticked</button>
+</form>
+{{end}}
 <ul class="cards">
     {{range .Items}}
     {{$it := .}}
     <li id="card-{{.RatingKey}}">
+        {{if $.User.IsAdmin}}<label class="tick"><input type="checkbox" form="bulk" name="id" value="{{.RatingKey}}" aria-label="tick {{.Title}}"></label>{{end}}
         <button type="button" class="card" popovertarget="item-{{.RatingKey}}">
             <img class="poster" src="/poster/{{.RatingKey}}" alt="" width="240" height="360" loading="lazy">
             <span class="card-title">{{.Title}}</span>
@@ -60,6 +134,12 @@
                     <dt>requested by</dt><dd>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</dd>
                     {{if eq .Type "movie"}}<dt>watched</dt><dd>{{if .Watched}}{{.Watched}} time{{if ne .Watched 1}}s{{end}}{{else}}never{{end}}</dd>{{end}}
                     <dt>last watched</dt><dd>{{day .LastWatched}}</dd>
+                    {{if .WatchedBy}}<dt>watched by</dt><dd>{{.WatchedBy}}</dd>{{end}}
+                    {{if $.User.IsAdmin}}
+                    <dt>labels</dt><dd class="chips">{{range .Labels}}<span class="chip">{{.}}<form class="inline-form" method="post" action="/library/item/{{$it.RatingKey}}/label"><input type="hidden" name="op" value="remove"><input type="hidden" name="name" value="{{.}}"><button type="submit" aria-label="remove label {{.}}">×</button></form></span>{{else}}<span class="muted">none</span>{{end}}
+                        <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/label"><input type="hidden" name="op" value="add"><input name="name" list="library-labels" placeholder="add label" aria-label="add a label to {{.Title}}"><button type="submit">add</button></form></dd>
+                    <dt>collections</dt><dd class="chips">{{range .Collections}}<span class="chip"><a href="/library/{{$it.SectionKey}}?collection={{.Key}}">{{.Title}}</a><form class="inline-form" method="post" action="/library/item/{{$it.RatingKey}}/collection/{{.Key}}/remove"><button type="submit" aria-label="take out of {{.Title}}">×</button></form></span>{{else}}<span class="muted">none</span>{{end}}</dd>
+                    {{end}}
                     {{if $.User.IsAdmin}}<dt>managed by</dt><dd>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</dd>{{end}}
                 </dl>
                 {{if $.User.IsAdmin}}

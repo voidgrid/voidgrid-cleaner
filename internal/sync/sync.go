@@ -35,6 +35,10 @@ type (
 		ShowPath(context.Context, string) (string, error)
 		ViewHistory(context.Context) ([]plex.View, error)
 		Accounts(context.Context) ([]plex.ServerAccount, error)
+		Labels(ctx context.Context, sectionKey string) ([]plex.Label, error)
+		LabelItems(ctx context.Context, sectionKey, labelKey string) ([]string, error)
+		Collections(ctx context.Context, sectionKey string) ([]plex.Collection, error)
+		CollectionItems(ctx context.Context, collectionKey string) ([]string, error)
 	}
 	RadarrAPI interface {
 		Movies(context.Context) ([]arr.Movie, error)
@@ -55,6 +59,7 @@ const (
 	SrcHistory     = "tautulli history"
 	SrcHistoryFull = "tautulli history (full)"
 	SrcPlexHistory = "plex history"
+	SrcTags        = "plex labels + collections"
 )
 
 // fullHistoryEvery is how often history is re-read whole instead of from
@@ -113,6 +118,7 @@ func (s *Syncer) Run(ctx context.Context) bool {
 		{SrcRequests, s.requests},
 		{histName, histFn},
 		{SrcPlexHistory, s.plexHistory},
+		{SrcTags, s.tags},
 	} {
 		n, err := step.fn(ctx)
 		if err != nil {

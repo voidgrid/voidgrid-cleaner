@@ -1,0 +1,23 @@
+{{define "content"}}
+<h1>labels</h1>
+<p class="muted">Plex labels in each library, and how many items carry each. Click a count to see those items in the library, where they can be ticked and changed. Plex keeps a label's name after its last item loses it, so a name with no items stays in this list: there is nothing left to remove from it.</p>
+{{if not .LabelRows}}
+<p class="muted">no labels yet. They're copied from Plex at each sync.</p>
+{{else}}
+<table>
+    <thead><tr><th>library</th><th>label</th><th>items</th><th><span class="visually-hidden">actions</span></th></tr></thead>
+    <tbody>
+    {{range .LabelRows}}
+    <tr>
+        <td>{{.SectionTitle}}</td>
+        <td>{{.Title}}</td>
+        <td>{{if .Items}}<a href="/library/{{.SectionKey}}?label={{.Title | urlquery}}">{{.Items}}</a>{{else}}<span class="muted">0, unused</span>{{end}}</td>
+        <td>{{if .Items}}<details class="confirm"><summary>remove from all</summary>
+            <form class="inline-form" method="post" action="/labels/remove"><input type="hidden" name="section" value="{{.SectionKey}}"><input type="hidden" name="label" value="{{.Title}}"><button type="submit">remove {{.Title}} from {{.Items}} item{{if ne .Items 1}}s{{end}}</button></form>
+        </details>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+</table>
+{{end}}
+{{end}}

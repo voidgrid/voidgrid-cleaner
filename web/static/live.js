@@ -11,6 +11,11 @@
   let posting = false;
   let loadingMore = false;
   let held = false;
+  const ticked = () => document.querySelector("ul.cards input[type=checkbox]:checked");
+  const showTicked = () => {
+    const n = document.getElementById("ticked");
+    if (n) n.textContent = document.querySelectorAll("ul.cards input[type=checkbox]:checked").length;
+  };
 
   async function fetchPage(url) {
     const res = await fetch(url);
@@ -71,7 +76,9 @@
       const doc = await fetchPage(url);
       swap("header nav", doc);
       swap("#count", doc);
-      swapCards(doc);
+      // Ticked cards would lose their ticks, so the cards wait until the batch is acted on or cleared.
+      if (ticked()) held = true;
+      else swapCards(doc);
       if (cards()) swapMore(doc);
       const area = liveArea();
       const nextArea = doc.querySelector("[data-live]");
@@ -173,6 +180,12 @@
       e.preventDefault();
       loadMore();
     }
+    if (e.target.matches("[data-tick-cards]")) {
+      const boxes = [...document.querySelectorAll("ul.cards input[type=checkbox]")];
+      const on = boxes.some((b) => !b.checked);
+      boxes.forEach((b) => { b.checked = on; });
+      showTicked();
+    }
     if (e.target.matches("[data-tick-all]")) {
       const boxes = [...e.target.closest("section").querySelectorAll("input[type=checkbox]")];
       const on = boxes.some((b) => !b.checked);
@@ -180,7 +193,8 @@
     }
   });
   document.addEventListener("change", () => {
-    if (held && !liveArea()?.querySelector("input[type=checkbox][form]:checked")) {
+    showTicked();
+    if (held && !ticked() && !liveArea()?.querySelector("input[type=checkbox][form]:checked")) {
       held = false;
       refresh().catch(() => {});
     }
