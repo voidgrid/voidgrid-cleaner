@@ -275,14 +275,19 @@ func (f *fakePlex) PreferLocalMetadata(context.Context, string) (bool, error) {
 }
 
 type fakeSeerr struct {
-	requested  []string // what was asked for: "tv 5 user 2 [1 3]" or "movie 100 user 2"
-	approved   []int64
-	status     int // what a new request starts as; 0 means pending
-	approveErr error
-	deleted    []int64
-	err        error
-	noTitle    bool
-	titleErr   error
+	requested           []string // what was asked for: "tv 5 user 2 [1 3]" or "movie 100 user 2"
+	approved            []int64
+	status              int // what a new request starts as; 0 means pending
+	approveErr          error
+	readBack            int  // the status a request has when read back
+	noRequest           bool // answer a request with success but make none, as Seerr does for a show that's all available
+	noRequestUntilReset bool // as noRequest, until the media is deleted
+	record              bool // Seerr has a record of the show
+	recordRequests      int  // how many requests that record holds
+	deleted             []int64
+	err                 error
+	noTitle             bool
+	titleErr            error
 }
 
 func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
@@ -297,6 +302,9 @@ func (f *fakeSeerr) Title(context.Context, string, int64) (string, error) {
 
 func (f *fakeSeerr) request(what string, tmdb int64) (seerr.Request, error) {
 	f.requested = append(f.requested, what)
+	if f.noRequest || (f.noRequestUntilReset && len(f.deleted) == 0) {
+		return seerr.Request{}, nil
+	}
 	r := seerr.Request{ID: 90 + int64(len(f.requested)), Status: max(f.status, seerr.StatusPending)}
 	r.Media.ID, r.Media.TmdbID = 50+tmdb, tmdb
 	return r, nil
@@ -313,6 +321,15 @@ func (f *fakeSeerr) RequestMovie(_ context.Context, tmdb, user int64) (seerr.Req
 func (f *fakeSeerr) ApproveRequest(_ context.Context, id int64) error {
 	f.approved = append(f.approved, id)
 	return f.approveErr
+}
+
+func (f *fakeSeerr) MediaRecord(context.Context, string, int64) (int64, int, bool, error) {
+	return 511, f.recordRequests, f.record, nil
+}
+
+// RequestByID answers with whatever status Seerr moved the request to on its own.
+func (f *fakeSeerr) RequestByID(_ context.Context, id int64) (seerr.Request, error) {
+	return seerr.Request{ID: id, Status: f.readBack}, nil
 }
 
 func (f *fakeSeerr) DeleteMedia(_ context.Context, id int64) error {
@@ -692,6 +709,58 @@ func TestAssignRequesterOnlyWhatExists(t *testing.T) {
 	}
 }
 
+// Seerr answers success with no request for a show that's all available. That must not
+// be stored, resolve the finding, or be approved.
+func TestAssignRequesterNoRequestMade(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.noRequest = true
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
+		t.Fatalf("%v", err)
+	}
+	var n int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '20'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("stored a request that doesn't exist: %d %v", n, err)
+	}
+	if len(w.seerr.approved) != 0 || len(w.open(t, KindNoRequester)) != 5 {
+		t.Fatalf("approved %v, open %d", w.seerr.approved, len(w.open(t, KindNoRequester)))
+	}
+}
+
+// A show Seerr counts as available can only be requested from a clean record, which its media
+// delete gives. The delete happens only when the record holds no requests.
+func TestAssignRequesterResetsSeerrRecord(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.noRequestUntilReset, w.seerr.record = true, true
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(w.seerr.deleted) != "[511]" || len(w.seerr.requested) != 2 || fmt.Sprint(w.seerr.approved) != "[92]" {
+		t.Fatalf("deleted %v requested %v approved %v", w.seerr.deleted, w.seerr.requested, w.seerr.approved)
+	}
+	var n int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE rating_key = '20' AND seerr_request_id = 92`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("stored %d %v", n, err)
+	}
+}
+
+func TestAssignRequesterNeverDeletesARecordWithRequests(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.noRequestUntilReset, w.seerr.record, w.seerr.recordRequests = true, true, 1
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) {
+		t.Fatalf("%v", err)
+	}
+	if len(w.seerr.deleted) != 0 || len(w.open(t, KindNoRequester)) != 5 {
+		t.Fatalf("deleted %v", w.seerr.deleted)
+	}
+	w.seerr.recordRequests, w.seerr.record = 0, false
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); !errors.Is(err, ErrNotAssignable) || len(w.seerr.deleted) != 0 {
+		t.Fatalf("no record to reset: %v %v", err, w.seerr.deleted)
+	}
+}
+
 func TestAssignRequesterApproval(t *testing.T) {
 	w, fs := assignWorld(t)
 	ctx := context.Background()
@@ -706,6 +775,26 @@ func TestAssignRequesterApproval(t *testing.T) {
 	var status int
 	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '20'`).Scan(&status); err != nil || status != seerr.StatusPending {
 		t.Fatalf("an unapproved request is stored as pending: %d %v", status, err)
+	}
+}
+
+// Seerr completes a request itself when the media is already available, then answers 409 to approve.
+func TestAssignRequesterAlreadyCompleted(t *testing.T) {
+	w, fs := assignWorld(t)
+	ctx := context.Background()
+	w.seerr.approveErr = &httpjson.StatusError{Service: "seerr", Code: http.StatusConflict}
+	w.seerr.readBack = seerr.StatusCompleted
+	if err := w.d.AssignRequester(ctx, fs["10"], 2); err != nil {
+		t.Fatalf("a request Seerr already completed is fine: %v", err)
+	}
+	var status int
+	if err := w.d.DB.QueryRowContext(ctx, `SELECT status FROM requests WHERE rating_key = '10'`).Scan(&status); err != nil || status != seerr.StatusCompleted {
+		t.Fatalf("stored: %d %v", status, err)
+	}
+	// A 409 on a request that is still pending is a real refusal.
+	w.seerr.readBack = seerr.StatusPending
+	if err := w.d.AssignRequester(ctx, fs["20"], 2); err == nil || !strings.Contains(err.Error(), "waits there") {
+		t.Fatalf("%v", err)
 	}
 }
 

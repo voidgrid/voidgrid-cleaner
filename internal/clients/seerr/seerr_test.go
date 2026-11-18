@@ -70,6 +70,15 @@ func fakeSeerr(t *testing.T, n int) *Client {
 		}
 		_, _ = w.Write([]byte(`{"id":77,"status":2}`))
 	})
+	mux.HandleFunc("GET /api/v1/request/77", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":77,"status":5}`))
+	})
+	mux.HandleFunc("GET /api/v1/tv/1399", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":1399,"name":"Show","mediaInfo":{"id":5,"requests":[{"id":11},{"id":12}]}}`))
+	})
+	mux.HandleFunc("GET /api/v1/tv/2000", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":2000,"name":"Unknown to Seerr"}`))
+	})
 	mux.HandleFunc("DELETE /api/v1/media/5", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Api-Key") != "key" {
 			w.WriteHeader(http.StatusForbidden)
@@ -127,8 +136,22 @@ func TestRequestShow(t *testing.T) {
 	if err := c.ApproveRequest(context.Background(), 77); err != nil {
 		t.Fatal(err)
 	}
+	if r, err := c.RequestByID(context.Background(), 77); err != nil || r.Status != StatusCompleted {
+		t.Fatalf("%+v %v", r, err)
+	}
 	if err := c.ApproveRequest(context.Background(), 78); err == nil {
 		t.Fatal("unknown request should fail")
+	}
+}
+
+func TestMediaRecord(t *testing.T) {
+	c := fakeSeerr(t, 0)
+	id, n, found, err := c.MediaRecord(context.Background(), "tv", 1399)
+	if err != nil || !found || id != 5 || n != 2 {
+		t.Fatalf("%d %d %v %v", id, n, found, err)
+	}
+	if _, _, found, err := c.MediaRecord(context.Background(), "tv", 2000); err != nil || found {
+		t.Fatalf("a title Seerr has no record of: %v %v", found, err)
 	}
 }
 

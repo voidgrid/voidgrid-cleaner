@@ -7,6 +7,7 @@ package seerr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -126,8 +127,9 @@ func (c *Client) Requests(ctx context.Context) ([]Request, error) {
 
 // Request statuses.
 const (
-	StatusPending  = 1
-	StatusApproved = 2
+	StatusPending   = 1
+	StatusApproved  = 2
+	StatusCompleted = 5 // approved and already available, which Seerr sets at once for media it has
 )
 
 // RequestShow files a request for the given seasons of a show on behalf of a
@@ -145,6 +147,32 @@ func (c *Client) RequestMovie(ctx context.Context, tmdbID, userID int64) (Reques
 	var r Request
 	err := c.call(ctx, http.MethodPost, "/api/v1/request", true,
 		map[string]any{"mediaType": "movie", "mediaId": tmdbID, "userId": userID}, &r)
+	return r, err
+}
+
+// MediaRecord finds Seerr's record of a title: its media ID and how many
+// requests it holds. found is false when Seerr has no record of it.
+// mediaType is "movie" or "tv".
+func (c *Client) MediaRecord(ctx context.Context, mediaType string, tmdbID int64) (id int64, requests int, found bool, err error) {
+	var out struct {
+		MediaInfo *struct {
+			ID       int64             `json:"id"`
+			Requests []json.RawMessage `json:"requests"` // counted, not read
+		} `json:"mediaInfo"`
+	}
+	if err := c.call(ctx, http.MethodGet, fmt.Sprintf("/api/v1/%s/%d", mediaType, tmdbID), true, nil, &out); err != nil {
+		return 0, 0, false, err
+	}
+	if out.MediaInfo == nil {
+		return 0, 0, false, nil
+	}
+	return out.MediaInfo.ID, len(out.MediaInfo.Requests), true, nil
+}
+
+// RequestByID reads one request.
+func (c *Client) RequestByID(ctx context.Context, id int64) (Request, error) {
+	var r Request
+	err := c.call(ctx, http.MethodGet, "/api/v1/request/"+strconv.FormatInt(id, 10), true, nil, &r)
 	return r, err
 }
 

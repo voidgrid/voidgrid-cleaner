@@ -138,6 +138,8 @@ type (
 		RequestShow(ctx context.Context, tmdbID, userID int64, seasons []int) (seerr.Request, error)
 		RequestMovie(ctx context.Context, tmdbID, userID int64) (seerr.Request, error)
 		ApproveRequest(context.Context, int64) error
+		RequestByID(context.Context, int64) (seerr.Request, error)
+		MediaRecord(ctx context.Context, mediaType string, tmdbID int64) (id int64, requests int, found bool, err error)
 	}
 )
 

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"time"
 
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/arr"
+	"github.com/voidgrid/voidgrid-cleaner/internal/clients/httpjson"
 	"github.com/voidgrid/voidgrid-cleaner/internal/clients/seerr"
 	"github.com/voidgrid/voidgrid-cleaner/internal/storage"
 )
@@ -80,14 +82,37 @@ func (d *Doctor) AssignRequester(ctx context.Context, f storage.Finding, userID 
 	if _, err := d.DB.SetFindingState(ctx, f.ID, "resolved"); err != nil {
 		return err
 	}
-	if req.Status == seerr.StatusApproved {
-		return nil // the user's own permissions approved it
+	if req.Status == seerr.StatusApproved || req.Status == seerr.StatusCompleted {
+		return nil // the user's own permissions approved it, or the media was already there
 	}
-	if err := d.Seerr.ApproveRequest(ctx, req.ID); err != nil {
+	status, err := d.approve(ctx, req.ID)
+	if err != nil {
 		return fmt.Errorf("the request was made but Seerr wouldn't approve it, so it waits there: %w", err)
 	}
-	rec.Status = seerr.StatusApproved
+	rec.Status = status
 	return d.DB.AddRequest(ctx, rec)
+}
+
+// approve approves a request and returns the status it ends with. Seerr
+// answers 409 for a request that needs no approval, which happens when the
+// media is already available and it completed the request itself; that counts
+// as approved once Seerr says so.
+func (d *Doctor) approve(ctx context.Context, id int64) (int, error) {
+	err := d.Seerr.ApproveRequest(ctx, id)
+	if err == nil {
+		return seerr.StatusApproved, nil
+	}
+	if se := (*httpjson.StatusError)(nil); !errors.As(err, &se) || se.Code != http.StatusConflict {
+		return 0, err
+	}
+	r, rerr := d.Seerr.RequestByID(ctx, id)
+	if rerr != nil {
+		return 0, fmt.Errorf("%w (and reading it back failed: %v)", err, rerr)
+	}
+	if r.Status != seerr.StatusApproved && r.Status != seerr.StatusCompleted {
+		return 0, fmt.Errorf("%w (its status is %d)", err, r.Status)
+	}
+	return r.Status, nil
 }
 
 func (d *Doctor) requestMovie(ctx context.Context, tmdb, userID int64) (seerr.Request, error) {
@@ -106,7 +131,37 @@ func (d *Doctor) requestMovie(ctx context.Context, tmdb, userID int64) (seerr.Re
 	if err != nil {
 		return req, fmt.Errorf("the request was refused by Seerr: %w", err)
 	}
-	return req, nil
+	return req, noRequestMade(req)
+}
+
+// noRequestMade is an error when Seerr answered without creating a request. It
+// does that for a show whose requested seasons are all already available: the
+// reply is a success with no request in it (ID 0), and nothing is stored.
+func noRequestMade(req seerr.Request) error {
+	if req.ID != 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: Seerr made no request, because every season asked for is already available in Seerr", ErrNotAssignable)
+}
+
+// resetSeerrShow deletes Seerr's record of a show so it can be requested again.
+// It only ever deletes a record that holds no requests: the delete takes every
+// request on it too, and a request this app doesn't know about must survive.
+func (d *Doctor) resetSeerrShow(ctx context.Context, tmdb int64) error {
+	id, requests, found, err := d.Seerr.MediaRecord(ctx, "tv", tmdb)
+	if err != nil {
+		return fmt.Errorf("reading Seerr's record of the show: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("%w: Seerr made no request and has no record of the show to reset", ErrNotAssignable)
+	}
+	if requests > 0 {
+		return fmt.Errorf("%w: Seerr already holds %d request(s) on this show, so its record is left alone", ErrNotAssignable, requests)
+	}
+	if err := d.Seerr.DeleteMedia(ctx, id); err != nil {
+		return fmt.Errorf("resetting Seerr's record of the show: %w", err)
+	}
+	return nil
 }
 
 // requestShow also returns the TMDB ID it used, which Sonarr may know when Plex doesn't.
@@ -132,5 +187,16 @@ func (d *Doctor) requestShow(ctx context.Context, tmdb, tvdb, userID int64) (see
 	if err != nil {
 		return req, 0, fmt.Errorf("the request was refused by Seerr: %w", err)
 	}
-	return req, tmdb, nil
+	if req.ID == 0 {
+		// Seerr drops every season it already tracks as available, partial, pending or
+		// processing, and then makes no request. Its media delete is what resets that,
+		// so the show is requested again from a clean record.
+		if err := d.resetSeerrShow(ctx, tmdb); err != nil {
+			return req, 0, err
+		}
+		if req, err = d.Seerr.RequestShow(ctx, tmdb, userID, seasons); err != nil {
+			return req, 0, fmt.Errorf("the request was refused by Seerr after resetting its record: %w", err)
+		}
+	}
+	return req, tmdb, noRequestMade(req)
 }
