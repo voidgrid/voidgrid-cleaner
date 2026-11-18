@@ -83,6 +83,49 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+// A movie's watched count never adds Plex's views to Tautulli's, which record the same ones.
+func TestMovieWatchedCount(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	if err := db.ReplaceLibrary(ctx, []Section{{Key: "1", Title: "Movies", Type: "movie"}, {Key: "2", Title: "TV", Type: "show"}}, []Media{
+		{RatingKey: "10", SectionKey: "1", Type: "movie", Title: "twice", AddedAt: 100},
+		{RatingKey: "11", SectionKey: "1", Type: "movie", Title: "once, plex only", AddedAt: 100},
+		{RatingKey: "12", SectionKey: "1", Type: "movie", Title: "never", AddedAt: 100},
+		{RatingKey: "13", SectionKey: "1", Type: "movie", Title: "old history", AddedAt: 1000},
+		{RatingKey: "20", SectionKey: "2", Type: "show", Title: "show", AddedAt: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	play := func(id int64, key string, watched bool, stopped int64) Play {
+		return Play{ReferenceID: id, PlexUserID: 5, MediaType: "movie", RatingKey: key, ShowRatingKey: key, Watched: watched, Stopped: stopped}
+	}
+	if err := db.UpsertPlays(ctx, []Play{
+		play(1, "10", true, 500), play(2, "10", true, 600), play(3, "10", false, 700), // Tautulli: two watched, one not
+		play(4, "13", true, 500), // from before it was added
+		{ReferenceID: 9, PlexUserID: 5, MediaType: "episode", RatingKey: "21", ShowRatingKey: "20", Watched: true, Stopped: 500},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplacePlexViews(ctx, []Play{play(-1, "10", true, 500), play(-2, "10", true, 600), play(-3, "11", true, 800)}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := db.LibraryItems(ctx, User{IsAdmin: true}, "1", LibraryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, it := range items {
+		got[it.RatingKey] = it.Watched
+	}
+	if got["10"] != 2 || got["11"] != 1 || got["12"] != 0 || got["13"] != 0 {
+		t.Fatalf("watched counts %v", got)
+	}
+	shows, _ := db.LibraryItems(ctx, User{IsAdmin: true}, "2", LibraryFilter{})
+	if len(shows) != 1 || shows[0].Watched != 0 {
+		t.Fatalf("a show has no count: %+v", shows)
+	}
+}
+
 func TestLibraryOwnership(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()

@@ -328,6 +328,7 @@ type LibraryItem struct {
 	Media
 	Requesters  string // display names, comma-separated; "" if nobody requested it
 	LastWatched int64  // unix seconds of the newest play by anyone, 0 if never
+	Watched     int    // times a movie was watched by anyone; 0 for a show
 	Status      string // one of the Status constants
 	DeletionID  int64  // pending deletion, 0 if none
 	DeleteAfter int64  // its time, 0 until the notification is confirmed
@@ -373,6 +374,13 @@ const owned = `m.rating_key IN (SELECT rating_key FROM requests WHERE seerr_user
 // reattaches old history when something is added again, and a re-add starts clean.
 const lastWatched = `coalesce((SELECT max(p.stopped) FROM plays p WHERE p.show_rating_key = m.rating_key AND p.stopped >= m.added_at), 0) AS last_watched`
 
+// watchedCount selects how many times a movie was watched, 0 for a show or if never.
+// Plex and Tautulli both record the same views, so the two counts are never added: the
+// larger one stands, which also covers a view only one of them has. Plays from before the
+// item's added date don't count, as in lastWatched.
+const watchedCount = `CASE WHEN m.type = 'movie' THEN coalesce((SELECT max(sum(p.reference_id > 0), sum(p.reference_id < 0)) FROM plays p
+	WHERE p.show_rating_key = m.rating_key AND p.watched = 1 AND p.stopped >= m.added_at), 0) ELSE 0 END AS watched_count`
+
 // byOldestWatched orders by lastWatched.
 const byOldestWatched = `last_watched = 0, last_watched, m.added_at, m.title COLLATE NOCASE`
 
@@ -410,7 +418,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 			coalesce((SELECT group_concat(name, ', ') FROM (
 				SELECT DISTINCT us.display_name AS name FROM requests r JOIN users us ON us.seerr_user_id = r.seerr_user_id
 				WHERE r.rating_key = m.rating_key ORDER BY us.display_name)), ''),
-			` + lastWatched + `,
+			` + lastWatched + `, ` + watchedCount + `,
 			coalesce((SELECT st.status FROM item_status st WHERE st.rating_key = m.rating_key), 'normal'),
 			coalesce(d.id, 0), coalesce(d.delete_after, 0),
 			coalesce((SELECT coalesce(u.display_name, du.name) FROM item_status st
@@ -476,7 +484,7 @@ func (db *DB) LibraryItems(ctx context.Context, u User, sectionKey string, f Lib
 		var it LibraryItem
 		m := &it.Media
 		if err := rows.Scan(&m.RatingKey, &m.SectionKey, &m.Type, &m.Title, &m.Year, &m.Thumb, &m.AddedAt,
-			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.MyAsk, &it.Total); err != nil {
+			&m.TmdbID, &m.TvdbID, &m.ArrID, &m.SizeBytes, &it.Requesters, &it.LastWatched, &it.Watched, &it.Status, &it.DeletionID, &it.DeleteAfter, &it.KeptBy, &it.MyAsk, &it.Total); err != nil {
 			return nil, err
 		}
 		out = append(out, it)

@@ -388,6 +388,28 @@ func TestLibrariesPage(t *testing.T) {
 	}
 }
 
+// A movie's detail panel shows how many times it was watched and when last; a show's has no count.
+func TestMovieDetailShowsWatchedCount(t *testing.T) {
+	app, c, s := newTestApp(t, 0)
+	seedLibrary(t, s)
+	ctx := context.Background()
+	postForm(t, c, app.URL+"/login/local", url.Values{"email": {"admin@x"}, "password": {"pw"}})
+	if err := s.DB.UpsertPlays(ctx, []storage.Play{
+		{ReferenceID: 1, PlexUserID: 5, MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700000000},
+		{ReferenceID: 2, PlexUserID: 6, MediaType: "movie", RatingKey: "10", ShowRatingKey: "10", Watched: true, Stopped: 1700086400},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := body(t, get(t, c, app.URL+"/library/1"))
+	if !strings.Contains(b, "<dt>watched</dt><dd>2 times</dd>") || !strings.Contains(b, "<dt>last watched</dt><dd>2023-11-15</dd>") ||
+		!strings.Contains(b, "<dt>watched</dt><dd>never</dd>") {
+		t.Fatalf("movie detail: %s", b)
+	}
+	if b := body(t, get(t, c, app.URL+"/library/2")); strings.Contains(b, "<dt>watched</dt>") {
+		t.Fatalf("a show shows a watched count: %s", b)
+	}
+}
+
 func TestLibrarySearchForm(t *testing.T) {
 	app, c, s := newTestApp(t, 0)
 	seedLibrary(t, s)

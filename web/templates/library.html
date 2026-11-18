@@ -58,6 +58,7 @@
                     <dt>added</dt><dd>{{day .AddedAt}}</dd>
                     <dt>size</dt><dd>{{if .SizeBytes}}{{gb .SizeBytes}}{{else}}<span class="muted">unknown</span>{{end}}</dd>
                     <dt>requested by</dt><dd>{{if .Requesters}}{{.Requesters}}{{else}}<span class="muted">nobody</span>{{end}}</dd>
+                    {{if eq .Type "movie"}}<dt>watched</dt><dd>{{if .Watched}}{{.Watched}} time{{if ne .Watched 1}}s{{end}}{{else}}never{{end}}</dd>{{end}}
                     <dt>last watched</dt><dd>{{day .LastWatched}}</dd>
                     {{if $.User.IsAdmin}}<dt>managed by</dt><dd>{{if .ArrID.Valid}}{{if eq .Type "show"}}sonarr{{else}}radarr{{end}}{{else}}<span class="muted">plex only</span>{{end}}</dd>{{end}}
                 </dl>
