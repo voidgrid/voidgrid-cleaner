@@ -17,6 +17,7 @@
             {{if not .ParentKey}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/keep"><button type="submit" aria-label="keep {{.Title}}">keep</button></form>
             <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/space_based"><button type="submit" aria-label="make {{.Title}} space-based">space-based</button></form>{{end}}
             {{if eq .State "notified"}}<form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/postpone"><button type="submit" aria-label="postpone {{.Title}}">postpone</button></form>{{end}}
+            <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/now"><button type="submit" aria-label="delete {{.Title}} now">now</button></form>
             <form class="inline-form" method="post" action="/library/item/{{.RatingKey}}/cancel"><button type="submit" aria-label="cancel deleting {{.Title}}">cancel</button></form>
         </div>{{end}}</td>{{end}}
     </tr>

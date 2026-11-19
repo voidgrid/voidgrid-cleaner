@@ -374,6 +374,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/library/item/{ratingKey}/collection/{collectionKey}/remove", s.itemCollectionRemove)
 			r.Post("/library/item/{ratingKey}/delete", s.scheduleDeletion)
 			r.Post("/library/item/{ratingKey}/cancel", s.changeDeletion("cancel deletion", s.DB.CancelDeletion))
+			r.Post("/library/item/{ratingKey}/now", s.changeDeletion("delete now", s.DB.DeleteNow))
 			r.Post("/library/item/{ratingKey}/postpone", s.changeDeletion("postpone deletion", s.DB.PostponeDeletion))
 			r.Post("/library/item/{ratingKey}/{status}", s.setStatus)
 			r.Post("/libraries/{key}/ignore", s.setIgnored(true))

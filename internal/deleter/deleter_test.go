@@ -437,6 +437,34 @@ func TestPostpone(t *testing.T) {
 	}
 }
 
+// "now" skips the notice, the wait and the delete window.
+func TestDeleteNow(t *testing.T) {
+	w, f, now := setup(t)
+	ctx := context.Background()
+	// A window the clock is outside of: only a "now" row may run.
+	closed := now.Add(6 * time.Hour)
+	win := storage.DeleteWindow{Start: closed.Format("15:04"), End: closed.Add(time.Hour).Format("15:04")}
+	if err := w.DB.SetDeleteWindow(ctx, win); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, w, "10", false)
+	schedule(t, w, "11", false)
+	if ok, err := w.DB.DeleteNow(ctx, "10"); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	w.Tick(ctx)
+	if d := recent(t, w); d.RatingKey != "10" || d.State != storage.DeletionDone {
+		t.Fatalf("%+v", d)
+	}
+	if n := len(active(t, w)); n != 1 {
+		t.Fatalf("the other item should still wait, %d active", n)
+	}
+	if ok, _ := w.DB.DeleteNow(ctx, "10"); ok {
+		t.Fatal("deleted a finished item now")
+	}
+	_ = f
+}
+
 func TestScheduleRefusals(t *testing.T) {
 	w, _, _ := setup(t)
 	ctx := context.Background()
@@ -461,7 +489,7 @@ func TestRestartFailsExecutingRows(t *testing.T) {
 	schedule(t, w, "10", false)
 	w.Tick(ctx)
 	*now = now.Add(storage.DeletionDelay + time.Minute)
-	if _, found, err := w.DB.ClaimDueDeletion(ctx, *now); err != nil || !found {
+	if _, found, err := w.DB.ClaimDueDeletion(ctx, *now, true); err != nil || !found {
 		t.Fatal(found, err)
 	}
 	if ok, _ := w.DB.CancelDeletion(ctx, "10"); ok {
@@ -532,7 +560,7 @@ func TestKeepAfterClaimRefused(t *testing.T) {
 	schedule(t, w, "10", false)
 	w.Tick(ctx)
 	*now = now.Add(storage.DeletionDelay + time.Minute)
-	d, found, err := w.DB.ClaimDueDeletion(ctx, *now)
+	d, found, err := w.DB.ClaimDueDeletion(ctx, *now, true)
 	if err != nil || !found {
 		t.Fatal(found, err)
 	}

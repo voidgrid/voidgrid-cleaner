@@ -170,6 +170,14 @@ func (db *DB) PostponeDeletion(ctx context.Context, ratingKey string) (bool, err
 		int64(DeletionDelay/time.Second), ratingKey, ratingKey, KindEphemeral, DeletionNotified))
 }
 
+// DeleteNow makes a waiting deletion due at once: no notice, no wait, and the
+// delete window doesn't hold it. An executing one is already going.
+func (db *DB) DeleteNow(ctx context.Context, ratingKey string) (bool, error) {
+	return changed(db.ExecContext(ctx, `
+		UPDATE deletions SET state = ?, delete_after = ?, immediate = 1 WHERE (rating_key = ? OR (parent_key = ? AND kind = ?)) AND state IN (?, ?)`,
+		DeletionNotified, time.Now().Unix(), ratingKey, ratingKey, KindEphemeral, DeletionScheduled, DeletionNotified))
+}
+
 // UnnotifiedDeletions returns deletions still waiting for their notification.
 func (db *DB) UnnotifiedDeletions(ctx context.Context, limit int) ([]Deletion, error) {
 	return db.deletions(ctx, `SELECT `+deletionCols+` FROM deletions WHERE state = ? ORDER BY id LIMIT ?`, DeletionScheduled, limit)
@@ -192,12 +200,13 @@ func (db *DB) MarkNotified(ctx context.Context, id int64, deleteAfter time.Time)
 
 // ClaimDueDeletion moves the oldest due deletion to executing, from which it
 // can't be cancelled, and returns it. That makes a one-click keep and the
-// worker unable to both win. found is false if nothing is due.
-func (db *DB) ClaimDueDeletion(ctx context.Context, now time.Time) (d Deletion, found bool, err error) {
+// worker unable to both win. Outside the delete window (inWindow false) only
+// a deletion an admin made immediate is claimed. found is false if nothing is due.
+func (db *DB) ClaimDueDeletion(ctx context.Context, now time.Time, inWindow bool) (d Deletion, found bool, err error) {
 	d, err = scanDeletion(db.QueryRowContext(ctx, `
 		UPDATE deletions SET state = ?
-		WHERE id = (SELECT id FROM deletions WHERE state = ? AND delete_after <= ? ORDER BY delete_after, id LIMIT 1)
-		RETURNING `+deletionCols, DeletionExecuting, DeletionNotified, now.Unix()))
+		WHERE id = (SELECT id FROM deletions WHERE state = ? AND delete_after <= ? AND (? OR immediate = 1) ORDER BY delete_after, id LIMIT 1)
+		RETURNING `+deletionCols, DeletionExecuting, DeletionNotified, now.Unix(), inWindow))
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, false, nil
 	}

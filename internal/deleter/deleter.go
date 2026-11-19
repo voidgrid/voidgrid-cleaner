@@ -161,12 +161,10 @@ func (w *Worker) Tick(ctx context.Context) {
 		log.Printf("deleter: digest: %v", err)
 	}
 	// Times are already set to fall in the window; this covers a window
-	// changed after they were set.
-	if !window.Contains(w.Now()) {
-		return
-	}
+	// changed after they were set. Outside it only "now" deletions run.
+	inWindow := window.Contains(w.Now())
 	for ctx.Err() == nil {
-		d, found, err := w.DB.ClaimDueDeletion(ctx, w.Now())
+		d, found, err := w.DB.ClaimDueDeletion(ctx, w.Now(), inWindow)
 		if err != nil {
 			log.Printf("deleter: claim: %v", err)
 			return
