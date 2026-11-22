@@ -96,6 +96,30 @@ th {
         padding: 1rem;
     }
 
+    /* Brand on its own line, links wrapping under it with even gaps. */
+    header.topbar {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+    }
+
+    header.topbar nav {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem 1rem;
+    }
+
+    header.topbar nav a {
+        margin-left: 0;
+        padding: 0.2rem 0;
+    }
+
+    footer {
+        padding: 0.5rem 1rem;
+    }
+
     table {
         display: block;
         overflow-x: auto;
