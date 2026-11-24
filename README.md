@@ -31,7 +31,7 @@ tags. `:beta` follows every tag, `:latest` only stable ones, and each tag
 ### Settings
 
 | Variable | Required | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `VGC_SEERR_URL` | yes | | Seerr base URL as the container sees it, e.g. `http://seerr:5055` |
 | `VGC_SEERR_API_KEY` | yes | | Seerr API key |
 | `VGC_PLEX_URL` | yes | | Plex Media Server URL, e.g. `http://192.0.2.10:32400` |
@@ -163,19 +163,40 @@ picked, because nothing says which disk they're on.
 The **doctor** page lists where Plex, Radarr, Sonarr, Seerr and the disk disagree: wrong or questionable Plex matches, release
 names as titles, untracked folders, stale requests, files off the naming scheme, and more. It runs after each sync. A service
 that can't be reached only skips the checks that need it, and their last results stay. Dismiss anything you've decided is
-fine, and it stays dismissed, with two exceptions: a show's missing episodes come back when another episode goes missing, and a Radarr or
-Sonarr warning comes back when what it says changes. If a managed path isn't verified, such as a missing mount, what the disk
-checks found under it stays as it was until it's back; other paths are checked as usual. Each section has its own **preview ticked fixes** and **dismiss ticked** buttons.
+fine, and it stays dismissed, with two exceptions: a show's missing episodes come back when another episode
+goes missing, and a Radarr or
+Sonarr warning comes back when what it says changes. If a managed path isn't verified, such as a missing
+mount, what the disk
+checks found under it stays as it was until it's back; other paths are checked as usual. Each section has its
+own **preview ticked fixes** and **dismiss ticked** buttons.
 
 Entries with a checkbox can be fixed from here: wrong and questionable Plex matches, release names as titles, and a library's
-**Prefer local metadata** setting, which is how those titles happen. If Plex's match is right and only the name is wrong, the
-fix is a metadata refresh, not a rematch. Radarr and Sonarr issues can be fixed too: renaming files to match your format, adding
-an untracked folder (unmonitored, with no search, so nothing downloads) or, for a show folder with no video in it, removing it
+**Prefer local metadata** setting, which is how those titles happen. If Plex's match is right and only the
+name is wrong, the
+fix is a metadata refresh, not a rematch. Radarr and Sonarr issues can be fixed too: renaming files to match
+your format, adding
+an untracked folder (unmonitored, with no search, so nothing downloads) or, for a show folder with no video in
+it, removing it
 instead, importing a file Radarr won't accept with a quality you
-pick, and stopping Radarr leaving empty folders. On managed paths it can also remove empty folders and delete stray files, and it
-can clear stale Seerr requests. Movies and shows nobody requested have no checkbox: pick a Seerr user from the list and press **assign** to make a request in their name. A movie goes through Seerr's request API and is approved there; a movie already on disk is completed by Seerr itself and Radarr isn't touched. A show is written straight into Seerr's database (`VGC_SEERR_DB`) instead, because Seerr's API would approve the request, which makes it re-monitor the show's unmonitored episodes and search, so Seerr never acts on a show's request: nothing is sent to Sonarr, no episode is re-monitored, no search runs and no notification goes out, and it doesn't use the user's request quota. It only covers what Radarr or Sonarr already have: a movie on disk or monitored, and a show's seasons with files or monitored. Anything else is refused, as is a show Seerr has no record of or one that already holds a request. Rows that can be fixed also have a **fix** button for that one entry. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie TMDb
-removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix and removing a show folder only report what they would delete. Every other fix is real whatever that setting says. Tick them and press **preview** to see exactly what would change; nothing
-happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip anything being
+pick, and stopping Radarr leaving empty folders. On managed paths it can also remove empty folders and delete
+stray files, and it
+can clear stale Seerr requests. Movies and shows nobody requested have no checkbox: pick a Seerr user from the
+list and press **assign** to make a request in their name. A movie goes through Seerr's request API and is
+approved there; a movie already on disk is completed by Seerr itself and Radarr isn't touched. A show is
+written straight into Seerr's database (`VGC_SEERR_DB`) instead, because Seerr's API would approve the
+request, which makes it re-monitor the show's unmonitored episodes and search, so Seerr never acts on a show's
+request: nothing is sent to Sonarr, no episode is re-monitored, no search runs and no notification goes out,
+and it doesn't use the user's request quota. It only covers what Radarr or Sonarr already have: a movie on
+disk or monitored, and a show's seasons with files or monitored. Anything else is refused, as is a show Seerr
+has no record of or one that already holds a request. Rows that can be fixed also have a **fix** button for
+that one entry. Missing items offer search, stop monitoring or remove; removing never touches a file. A movie
+TMDb
+removed can be taken out of Radarr, keeping its file, and other Radarr and Sonarr warnings link to their help
+page. Stray files are gone for good; until `VGC_DELETE_LIVE=true`, that fix and removing a show folder only
+report what they would delete. Every other fix is real whatever that setting says. Tick them and press
+**preview** to see exactly what would change; nothing
+happens until you press **apply**. Fixes run one at a time in the background, are checked afterwards, and skip
+anything being
 deleted.
 
 It needs to see your media to check the disk; see [Mounts](#mounts). The doctor looks only inside paths you've ticked as
@@ -185,8 +206,10 @@ needed.
 ### Downloads
 
 The **downloads** page shows Radarr's and Sonarr's queues together, with each item's real reason when it's stuck. A stuck
-download appears on the doctor page with its fixes, and is posted once: straight away if Radarr or Sonarr won't import it or it
-failed, since those never clear on their own, and after 15 minutes if it's only a warning, such as a stalled download. The fixes: import it as Radarr or Sonarr identified it, remove it,
+download appears on the doctor page with its fixes, and is posted once: straight away if Radarr or Sonarr
+won't import it or it
+failed, since those never clear on their own, and after 15 minutes if it's only a warning, such as a stalled
+download. The fixes: import it as Radarr or Sonarr identified it, remove it,
 blocklist only, or blocklist and search. With `VGC_DISCORD_ADMIN_CHANNEL` set, it's also posted there with buttons for remove
 and both blocklists; only an admin whose Discord account is linked on the users page can press them.
 
@@ -194,7 +217,8 @@ and both blocklists; only an admin whose Discord account is linked on the users 
 
 The **log** page shows who decided what: status changes, deletions and each of their steps, Keep and Add me presses, and
 settings changes. At the **audit** log level, the default, it also records every call the app makes to another service while
-acting: method, path and result, never keys or tokens. **Normal** leaves those out. Entries older than the **log expiry** on the
+acting: method, path and result, never keys or tokens. **Normal** leaves those out. Entries older than the
+**log expiry** on the
 settings page (default 90 days) are removed.
 
 ### Watch history
@@ -203,14 +227,16 @@ A watch counts if either Plex or Tautulli has it. Plex's history goes back furth
 is down, plays keep arriving from Plex, and a deletion only needs one of the two to confirm nobody is watching. Plays of
 items since removed from Plex can't be tied to anything in the library.
 
-Plex reattaches old history when something is added again. Here a re-add starts clean: plays from before an item's added date
+Plex reattaches old history when something is added again. Here a re-add starts clean: plays from before an
+item's added date
 don't count. Plex's own watched marks aren't changed.
 
 ### Daily digest
 
 Once a day, at the time on the **settings** page (default 05:30), the bot posts what's going in the next day, the one thing
 anyone can still act on. It names shows, never episodes, tags nobody and has no buttons. What was deleted and which ephemeral
-shows are waiting on someone are on the **status** page instead. With `VGC_DISCORD_ADMIN_CHANNEL` set, a second post there covers failed or held deletions, sync errors, new doctor
+shows are waiting on someone are on the **status** page instead. With `VGC_DISCORD_ADMIN_CHANNEL` set, a
+second post there covers failed or held deletions, sync errors, new doctor
 findings, unlinked users and disk levels. Days with nothing to say post nothing.
 
 ### Ephemeral shows
@@ -233,7 +259,8 @@ show with nobody on it loses none.
 Admins press **delete** on an item. A Discord bot posts it to a channel, and
 the app deletes it 24 hours after Discord confirms the post; if the post fails,
 the clock doesn't start. Until then anyone in the channel can press **Keep**,
-and the **status** screen can keep, postpone or cancel it. Right before deleting, the app checks that nobody is watching and
+and the **status** screen can keep, postpone or cancel it. Right before deleting, the app checks that nobody
+is watching and
 asks Radarr and Sonarr whether they manage the item. On the **settings** page,
 admins can change the window deletions run in, 03:00 to 05:00 by default, or
 clear it to delete at any time; anything due outside it waits for the window
@@ -283,9 +310,11 @@ Everything also works without JavaScript, as plain links and forms.
 
 ### Requests
 
-Everyone else works on what they requested, from the item's card: **make ephemeral** applies at once, because anyone can add
+Everyone else works on what they requested, from the item's card: **make ephemeral** applies at once, because
+anyone can add
 themselves to an ephemeral show, and only from no status, so it never overrides an admin. **ask to keep** and **ask to
-delete** wait on the **admin** page, where admins approve or deny them. Approving one settles the item: any other ask on it is
+delete** wait on the **admin** page, where admins approve or deny them. Approving one settles the item: any
+other ask on it is
 denied. Conflicting asks are marked. Space-based is for admins only. Admins can let a user skip approval; their asks then
 apply at once, unless someone else's ask on the same item is waiting.
 
