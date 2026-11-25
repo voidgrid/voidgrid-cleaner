@@ -503,10 +503,12 @@ func hasKnownFile(root string, known []string) bool {
 func (s *snapshot) pathsNotMounted() []storage.Finding {
 	var out []storage.Finding
 	for _, p := range s.paths {
-		if !p.Visible {
+		// Only media paths matter: Radarr and Sonarr list download folders
+		// as disks, and the user leaves some unmounted on purpose.
+		if p.Media && !p.Visible {
 			out = append(out, storage.Finding{
 				Subject: p.Path, Title: p.Path, Severity: problem,
-				Detail: p.UsedBy + " uses this path and this app can't see it. Mount it at the same path, or if it's mounted somewhere else here, say where under library paths on the settings page. Dismiss this if it isn't needed here.",
+				Detail: p.UsedBy + " uses this path and this app can't see it. Mount it at the same path, or if it's mounted somewhere else here, say where under library paths on the settings page.",
 			})
 		}
 	}
@@ -517,7 +519,7 @@ func (s *snapshot) pathsNotVerified() []storage.Finding {
 	known := s.sampleFiles()
 	var out []storage.Finding
 	for _, p := range s.paths {
-		if p.Visible && !p.Verified && hasKnownFile(p.Path, known) {
+		if p.Media && p.Visible && !p.Verified && hasKnownFile(p.Path, known) {
 			out = append(out, storage.Finding{
 				Subject: p.Path, Title: p.Path, Severity: problem,
 				Detail: "The folder is here, but files " + p.UsedBy + " list aren't. It may be an empty mountpoint, or another folder is mounted here; say where it really is under library paths on the settings page. Disk checks skip it until then.",

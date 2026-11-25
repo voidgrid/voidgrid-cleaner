@@ -411,7 +411,17 @@ func TestPathChecks(t *testing.T) {
 	w := newWorld(t)
 	w.radarr.state.disks = []arr.DiskSpace{{Path: "/data/nowhere", TotalSpace: 1}, {Path: "/config", TotalSpace: 1}, {Path: "/", TotalSpace: 1}}
 	w.run(t)
-	if fs := w.open(t, KindPathNotMounted); len(fs) != 1 || fs[0].Subject != "/data/nowhere" {
+	// A disk that isn't a root folder or library (a download folder) isn't needed here.
+	if fs := w.open(t, KindPathNotMounted); len(fs) != 0 {
+		t.Fatalf("%+v", fs)
+	}
+	ps, _ := w.d.DB.LibraryPaths(context.Background())
+	if len(ps) != 2 {
+		t.Fatalf("%+v", ps)
+	}
+	w.radarr.state.roots = append(w.radarr.state.roots, arr.RootFolder{Path: "/data/missing"})
+	w.run(t)
+	if fs := w.open(t, KindPathNotMounted); len(fs) != 1 || fs[0].Subject != "/data/missing" {
 		t.Fatalf("%+v", fs)
 	}
 }
